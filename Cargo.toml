@@ -1,0 +1,38 @@
+[profile.release]
+opt-level = "z"     # 优化体积
+lto = true          # 链接时优化
+codegen-units = 1   # 单编译单元，更好优化
+strip = true        # 剥离符号
+panic = "abort"     # 减少 unwind 表
+
+[package]
+name = "qi-toolbox"
+version = "0.1.0"
+edition = "2021"
+description = "Qi Toolbox - 2FA验证码生成、Bcrypt密码加密、Turso数据库浏览"
+license = "MIT"
+repository = "https://github.com/wujianqi/qi-toolbox"
+
+[[bin]]
+name = "qi-toolbox"
+path = "src/main.rs"
+
+# Windows GUI 应用程序，不显示控制台窗口
+[package.metadata.winres]
+OriginalFilename = "qi-toolbox.exe"
+
+[dependencies]
+eframe = "0.34"
+egui = "0.34"
+egui_extras = "0.34"
+egui-cjk-font = "0.2"
+bcrypt = "0.15"
+getrandom = "0.2"
+totp-rs = { version = "5", features = ["gen_secret", "otpauth"] }
+qrcode = "0.14"
+turso = "0.6.1"
+tokio = { version = "1", features = ["rt"] }
+rfd = "0.15"
+
+[target.'cfg(windows)'.dependencies]
+windows-sys = { version = "0.52", features = ["Win32_Foundation", "Win32_System_Console", "Win32_UI_WindowsAndMessaging"] }

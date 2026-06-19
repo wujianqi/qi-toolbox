@@ -1,0 +1,12 @@
+/target
+*.exe
+*.pdb
+*.ilk
+*.obj
+*.dll
+*.lib
+*.exp
+*.log
+*.tmp
+qi_key.txt
+code.bat
