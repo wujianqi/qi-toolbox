@@ -61,10 +61,9 @@ pub mod lang {
 
     // TOTP 页
     pub const TOTP_TITLE: &str = "2FA TOTP验证码生成器";
-    pub const TOTP_ALGO: &str = "哈希算法：";
     pub const TOTP_GEN_KEY: &str = "\u{1F511} 生成密钥";
     pub const TOTP_GEN_HINT: &str = "(生成兼容主流平台的安全密钥)";
-    pub const TOTP_KEY_LABEL: &str = "Base32密钥：";
+    pub const TOTP_KEY_LABEL: &str = "Base32密钥，";
     pub const TOTP_KEY_WARN: &str = "已实际应用的密钥请妥善保存，泄漏将严重影响安全。";
     pub const TOTP_ACCOUNT: &str = "账号名：";
     pub const TOTP_ACCOUNT_HINT: &str = "用户账号名";
@@ -187,10 +186,9 @@ pub mod lang {
 
     // TOTP tab
     pub const TOTP_TITLE: &str = "2FA TOTP Authenticator";
-    pub const TOTP_ALGO: &str = "Hash Algorithm:";
     pub const TOTP_GEN_KEY: &str = "\u{1F511} Generate Key";
     pub const TOTP_GEN_HINT: &str = "(Generate a secure key compatible with major platforms)";
-    pub const TOTP_KEY_LABEL: &str = "Base32 Key:";
+    pub const TOTP_KEY_LABEL: &str = "Base32 Key,";
     pub const TOTP_KEY_WARN: &str = "Keep your active key safe. Leaking it will severely compromise security.";
     pub const TOTP_ACCOUNT: &str = "Account Name:";
     pub const TOTP_ACCOUNT_HINT: &str = "e.g. user@example.com";

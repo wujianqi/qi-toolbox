@@ -95,8 +95,9 @@ fn highlighted_layout(text: &str) -> LayoutJob {
 }
 
 /// TextEdit layouter 回调 — 供 egui TextEdit::layouter() 使用
-pub fn sql_layouter(ui: &egui::Ui, text: &dyn egui::TextBuffer, _wrap_width: f32) -> std::sync::Arc<egui::text::Galley> {
-    let job = highlighted_layout(text.as_str());
+pub fn sql_layouter(ui: &egui::Ui, text: &dyn egui::TextBuffer, wrap_width: f32) -> std::sync::Arc<egui::text::Galley> {
+    let mut job = highlighted_layout(text.as_str());
+    job.wrap.max_width = wrap_width;
     ui.painter().layout_job(job)
 }
 

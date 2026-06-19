@@ -158,7 +158,6 @@ impl eframe::App for QiToolboxApp {
                 match self.selected_tab {
                     AppTab::TursoData => {
                         self.render_turso_tab(ui);
-                        return;
                     }
                     AppTab::Totp => {
                         ui.add_space(8.0);
@@ -362,7 +361,20 @@ impl QiToolboxApp {
         });
 
         ui.add_space(15.0);
-        ui.label(RichText::new(lang::TOTP_KEY_LABEL).size(14.0));
+        ui.horizontal(|ui| {
+            ui.label(RichText::new(lang::TOTP_KEY_LABEL).size(14.0));
+            egui::ComboBox::from_id_salt("totp_algorithm")
+                .selected_text(match self.totp_algorithm {
+                    Algorithm::SHA1 => "SHA1",
+                    Algorithm::SHA256 => "SHA256",
+                    Algorithm::SHA512 => "SHA512",
+                })
+                .show_ui(ui, |ui| {
+                    ui.selectable_value(&mut self.totp_algorithm, Algorithm::SHA1, "SHA1");
+                    ui.selectable_value(&mut self.totp_algorithm, Algorithm::SHA256, "SHA256");
+                    ui.selectable_value(&mut self.totp_algorithm, Algorithm::SHA512, "SHA512");
+                });
+        });
         ui.label(RichText::new(lang::TOTP_KEY_WARN).size(12.0).color(egui::Color32::RED));
         ui.add_space(5.0);
 
@@ -382,19 +394,6 @@ impl QiToolboxApp {
                     .hint_text(lang::TOTP_ISSUER_HINT)
                     .font(FontId::monospace(13.0)),
             );
-            ui.add_space(10.0);
-            ui.label(RichText::new(lang::TOTP_ALGO).size(13.0));
-            egui::ComboBox::from_id_salt("totp_algorithm")
-                .selected_text(match self.totp_algorithm {
-                    Algorithm::SHA1 => "SHA1",
-                    Algorithm::SHA256 => "SHA256",
-                    Algorithm::SHA512 => "SHA512",
-                })
-                .show_ui(ui, |ui| {
-                    ui.selectable_value(&mut self.totp_algorithm, Algorithm::SHA1, "SHA1");
-                    ui.selectable_value(&mut self.totp_algorithm, Algorithm::SHA256, "SHA256");
-                    ui.selectable_value(&mut self.totp_algorithm, Algorithm::SHA512, "SHA512");
-                });
         });
 
         ui.horizontal(|ui| {
