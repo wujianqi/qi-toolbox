@@ -1,6 +1,7 @@
 use crate::{password, totp, turso_viewer, datatable, strings::lang, sql_editor};
 use egui::{CentralPanel, FontId, Panel, RichText, ScrollArea, TextEdit};
 use std::sync::Arc;
+use totp_rs::Algorithm;
 
 #[derive(Default, PartialEq, Clone)]
 enum AppTab {
@@ -19,6 +20,7 @@ pub struct QiToolboxApp {
     turso_viewer: turso_viewer::TursoViewer,
     account_name: String,
     issuer: String,
+    totp_algorithm: Algorithm,
     hash_algorithm: password::HashAlgorithm,
     platform_preset: password::PlatformPreset,
     key_loaded: bool,
@@ -40,6 +42,7 @@ impl QiToolboxApp {
             turso_viewer: turso_viewer::TursoViewer::default(),
             account_name: String::from("user"),
             issuer: String::from("Qi"),
+            totp_algorithm: Algorithm::SHA1,
             hash_algorithm: password::HashAlgorithm::Argon2id,
             platform_preset: password::PlatformPreset::None,
             key_loaded: false,
@@ -70,7 +73,10 @@ impl QiToolboxApp {
 
         let len = length.max(8);
         let mut bytes = vec![0u8; len];
-        getrandom::getrandom(&mut bytes).expect("rng failed");
+        if let Err(e) = getrandom::getrandom(&mut bytes) {
+            self.output_text = format!("RNG error: {}", e);
+            return;
+        }
 
         let mut chars: Vec<char> = Vec::with_capacity(len);
         // 保证至少包含四类字符各一个
@@ -92,10 +98,13 @@ impl QiToolboxApp {
 
     fn update_qr_code(&mut self) {
         if self.selected_tab == AppTab::Totp && !self.input_text.is_empty() {
-            let secret_key = self.input_text.trim();
+            let secret_key = self.input_text.trim().to_string();
+            let account_name = self.account_name.clone();
+            let issuer = self.issuer.clone();
+            let algorithm = self.totp_algorithm;
 
-            let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                totp::generate_qr_code_data(secret_key, &self.account_name, &self.issuer)
+            let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(move || {
+                totp::generate_qr_code_data(&secret_key, &account_name, &issuer, algorithm)
             }));
 
             match result {
@@ -373,6 +382,19 @@ impl QiToolboxApp {
                     .hint_text(lang::TOTP_ISSUER_HINT)
                     .font(FontId::monospace(13.0)),
             );
+            ui.add_space(10.0);
+            ui.label(RichText::new(lang::TOTP_ALGO).size(13.0));
+            egui::ComboBox::from_id_salt("totp_algorithm")
+                .selected_text(match self.totp_algorithm {
+                    Algorithm::SHA1 => "SHA1",
+                    Algorithm::SHA256 => "SHA256",
+                    Algorithm::SHA512 => "SHA512",
+                })
+                .show_ui(ui, |ui| {
+                    ui.selectable_value(&mut self.totp_algorithm, Algorithm::SHA1, "SHA1");
+                    ui.selectable_value(&mut self.totp_algorithm, Algorithm::SHA256, "SHA256");
+                    ui.selectable_value(&mut self.totp_algorithm, Algorithm::SHA512, "SHA512");
+                });
         });
 
         ui.horizontal(|ui| {
@@ -384,7 +406,7 @@ impl QiToolboxApp {
             );
 
             if ui.button(RichText::new(lang::TOTP_GENERATE)).clicked() && !self.input_text.is_empty() {
-                self.output_text = totp::run(self.input_text.trim());
+                self.output_text = totp::run(self.input_text.trim(), self.totp_algorithm);
             }
             if ui.button(RichText::new(lang::TOTP_SAVE)).clicked() && !self.input_text.is_empty() {
                 let key = self.input_text.trim();

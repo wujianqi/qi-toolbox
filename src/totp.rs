@@ -8,38 +8,35 @@ use totp_rs::{Algorithm, Secret, TOTP};
 use qrcode::QrCode;
 
 /// 生成随机的 Base32 编码密钥（20字节 = 160位）
-/// 这与 server/src/util/two_fa.rs 中的 generate_secret() 函数完全一致
 pub fn generate_secret_key() -> String {
     Secret::generate_secret().to_encoded().to_string()
 }
 
-/// 根据密钥和时间步长生成 TOTP 验证码（与后端完全一致）
-pub fn generate_totp_with_time_step(secret: &str, time_step: u64) -> String {
-    let key_bytes = match decode_secret(secret) {
-        Some(b) => b,
-        None => return "000000".to_string(),
-    };
+/// 根据密钥、算法和时间步长生成 TOTP 验证码
+pub fn generate_totp_with_time_step(secret: &str, algorithm: Algorithm, time_step: u64) -> Result<String, String> {
+    let key_bytes = decode_secret(secret)
+        .ok_or_else(|| "Invalid Base32 secret key".to_string())?;
 
     let timestamp = SystemTime::now()
         .duration_since(UNIX_EPOCH)
-        .expect("SystemTime should always be after UNIX_EPOCH")
+        .map_err(|e| format!("SystemTime error: {}", e))?
         .as_secs();
-    let time_counter = (timestamp / 30).saturating_add(time_step);
+    // 注意：generate() 内部已处理 step 除法，这里直接传原始时间戳
+    let time = timestamp.saturating_add(time_step);
 
-    let totp = TOTP::new(Algorithm::SHA1, 6, 1, 30, key_bytes, None, String::new())
-        .expect("TOTP creation should not fail with valid inputs");
+    let totp = TOTP::new_unchecked(algorithm, 6, 1, 30, key_bytes, None, String::new());
 
-    totp.generate(time_counter)
+    Ok(totp.generate(time))
 }
 
 /// 生成 TOTP 验证码（使用当前时间）
-pub fn generate_totp(secret_key: &str) -> Result<String, String> {
-    Ok(generate_totp_with_time_step(secret_key, 0))
+pub fn generate_totp(secret_key: &str, algorithm: Algorithm) -> Result<String, String> {
+    generate_totp_with_time_step(secret_key, algorithm, 0)
 }
 
 /// 运行 TOTP 工具并返回输出字符串
-pub fn run(secret_key: &str) -> String {
-    match generate_totp(secret_key) {
+pub fn run(secret_key: &str, algorithm: Algorithm) -> String {
+    match generate_totp(secret_key, algorithm) {
         Ok(code) => code,
         Err(e) => e,
     }
@@ -47,22 +44,19 @@ pub fn run(secret_key: &str) -> String {
 
 /// 为给定的密钥生成二维码 RGBA 数据（用于2FA配置）
 /// 返回 (rgba_bytes, width, height)
-pub fn generate_qr_code_data(secret_key: &str, account_name: &str, issuer: &str) -> Result<(Vec<u8>, u32, u32), String> {
-    let key_bytes = match decode_secret(secret_key) {
-        Some(b) => b,
-        None => return Err("Invalid secret key".to_string()),
-    };
+pub fn generate_qr_code_data(secret_key: &str, account_name: &str, issuer: &str, algorithm: Algorithm) -> Result<(Vec<u8>, u32, u32), String> {
+    let key_bytes = decode_secret(secret_key)
+        .ok_or_else(|| "Invalid Base32 secret key".to_string())?;
 
-    let totp = TOTP::new(
-        Algorithm::SHA1,
+    let totp = TOTP::new_unchecked(
+        algorithm,
         6,
         1,
         30,
         key_bytes,
         Some(issuer.to_string()),
         account_name.to_string(),
-    )
-    .map_err(|e| format!("Failed to create TOTP: {}", e))?;
+    );
 
     let otpauth_uri = totp.get_url();
 

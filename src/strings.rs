@@ -61,6 +61,7 @@ pub mod lang {
 
     // TOTP 页
     pub const TOTP_TITLE: &str = "2FA TOTP验证码生成器";
+    pub const TOTP_ALGO: &str = "哈希算法：";
     pub const TOTP_GEN_KEY: &str = "\u{1F511} 生成密钥";
     pub const TOTP_GEN_HINT: &str = "(生成兼容主流平台的安全密钥)";
     pub const TOTP_KEY_LABEL: &str = "Base32密钥：";
@@ -186,6 +187,7 @@ pub mod lang {
 
     // TOTP tab
     pub const TOTP_TITLE: &str = "2FA TOTP Authenticator";
+    pub const TOTP_ALGO: &str = "Hash Algorithm:";
     pub const TOTP_GEN_KEY: &str = "\u{1F511} Generate Key";
     pub const TOTP_GEN_HINT: &str = "(Generate a secure key compatible with major platforms)";
     pub const TOTP_KEY_LABEL: &str = "Base32 Key:";
