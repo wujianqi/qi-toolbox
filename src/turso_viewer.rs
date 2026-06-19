@@ -1,6 +1,7 @@
 //! Turso 数据库查看器模块
 
 use turso::Builder;
+use crate::strings::lang;
 
 /// 安全地将 turso Value 转为 String，不 panic
 /// 使用 catch_unwind 防止 turso crate 内部 unreachable panic 传播
@@ -89,7 +90,7 @@ where
         db_path.to_string()
     } else {
         std::env::current_dir()
-            .map_err(|e| format!("获取当前目录失败: {}", e))?
+            .map_err(|e| lang::ERR_DIR.replace("{}", &e.to_string()))?
             .join(db_path)
             .to_string_lossy()
             .to_string()
@@ -101,60 +102,36 @@ where
         path
     };
 
-    let log = |_step: &str, _msg: &str| {
-        // 暂不生成日志
-    };
-
-    log("1", &format!("路径: {}", normalized));
-
     let handle = std::thread::spawn(move || {
-        log("2", "线程启动");
-
-        let rt = match tokio::runtime::Builder::new_current_thread()
+        let rt = tokio::runtime::Builder::new_current_thread()
             .enable_all()
             .build()
-        {
-            Ok(rt) => { log("3", "runtime 创建成功"); rt }
-            Err(e) => { log("3", &format!("runtime 创建失败: {}", e)); return Err(format!("创建运行时失败: {}", e)); }
-        };
+            .map_err(|e| lang::ERR_RUNTIME.replace("{}", &e.to_string()))?;
 
         rt.block_on(async {
-            log("4", "开始 block_on");
-
-            log("5", "调用 Builder::new_local");
-            let db = match Builder::new_local(&normalized)
+            let db = Builder::new_local(&normalized)
                 .experimental_index_method(true)
                 .build()
                 .await
-            {
-                Ok(db) => { log("6", "build 成功"); db }
-                Err(e) => { log("6", &format!("build 失败: {:?}", e)); return Err(format!("连接数据库失败: {}", e)); }
-            };
+                .map_err(|e| lang::ERR_CONNECT_DB.replace("{}", &e.to_string()))?;
 
-            log("7", "调用 db.connect");
-            let conn = match db.connect() {
-                Ok(conn) => { log("8", "connect 成功"); conn }
-                Err(e) => { log("8", &format!("connect 失败: {:?}", e)); return Err(format!("获取连接失败: {}", e)); }
-            };
+            let conn = db.connect()
+                .map_err(|e| lang::ERR_GET_CONN.replace("{}", &e.to_string()))?;
 
-            log("9", "调用 f(conn)");
-            let result = f(conn).await;
-            log("10", "f 完成");
-            result
+            f(conn).await
         })
     });
 
     match handle.join() {
-        Ok(r) => { log("11", "线程正常结束"); r }
+        Ok(r) => r,
         Err(e) => {
             let msg = if let Some(s) = e.downcast_ref::<&str>() {
-                format!("线程panic: {}", s)
+                lang::ERR_THREAD_PANIC.replace("{}", s)
             } else if let Some(s) = e.downcast_ref::<String>() {
-                format!("线程panic: {}", s)
+                lang::ERR_THREAD_PANIC.replace("{}", s)
             } else {
-                "线程panic(未知)".to_string()
+                lang::ERR_THREAD_PANIC_UNKNOWN.to_string()
             };
-            log("11", &msg);
             Err(msg)
         }
     }
@@ -173,7 +150,7 @@ impl TursoViewer {
                         Vec::<turso::Value>::new(),
                     )
                     .await
-                    .map_err(|e| format!("查询表列表失败: {}", e))?;
+                    .map_err(|e| lang::ERR_QUERY_TABLES.replace("{}", &e.to_string()))?;
 
                 let mut tables = Vec::new();
                 while let Ok(Some(row)) = rows.next().await {
@@ -190,7 +167,7 @@ impl TursoViewer {
                     let mut rows = conn
                         .query(&format!("PRAGMA table_info({})", name), Vec::<turso::Value>::new())
                         .await
-                        .map_err(|e| format!("获取表结构失败: {}", e))?;
+                        .map_err(|e| lang::ERR_TABLE_INFO.replace("{}", &e.to_string()))?;
                     let mut cols = Vec::new();
                     while let Ok(Some(row)) = rows.next().await {
                         let n = value_to_string(&row, 1);
@@ -213,7 +190,7 @@ impl TursoViewer {
                     let mut rows = conn
                         .query(&format!("SELECT * FROM {} LIMIT 500", name), Vec::<turso::Value>::new())
                         .await
-                        .map_err(|e| format!("查询表数据失败: {}", e))?;
+                        .map_err(|e| lang::ERR_QUERY_DATA.replace("{}", &e.to_string()))?;
                     let mut data = Vec::new();
                     while let Ok(Some(row)) = rows.next().await {
                         let mut rd = Vec::new();
@@ -251,7 +228,7 @@ impl TursoViewer {
                 let mut rows = conn
                     .query(&format!("PRAGMA table_info({})", name), Vec::<turso::Value>::new())
                     .await
-                    .map_err(|e| format!("获取表结构失败: {}", e))?;
+                    .map_err(|e| lang::ERR_TABLE_INFO.replace("{}", &e.to_string()))?;
                 let mut cols = Vec::new();
                 while let Ok(Some(row)) = rows.next().await {
                     let n = value_to_string(&row, 1);
@@ -274,7 +251,7 @@ impl TursoViewer {
                 let mut rows = conn
                     .query(&format!("SELECT * FROM {} LIMIT 500", name), Vec::<turso::Value>::new())
                     .await
-                    .map_err(|e| format!("查询表数据失败: {}", e))?;
+                    .map_err(|e| lang::ERR_QUERY_DATA.replace("{}", &e.to_string()))?;
                 let mut data = Vec::new();
                 while let Ok(Some(row)) = rows.next().await {
                     let mut rd = Vec::new();
@@ -299,6 +276,69 @@ impl TursoViewer {
         Ok(())
     }
 
+    /// 执行任意 SQL 查询，将结果写入 table_data / column_names / row_count
+    pub fn execute_sql(&mut self, sql: &str) -> Result<(), String> {
+        let sql = sql.trim().to_string();
+        if sql.is_empty() {
+            return Err(lang::ERR_EMPTY_SQL.to_string());
+        }
+
+        let db_path = self.db_path.clone();
+        let (_, _, data, cols, row_count, err) = run_query(&db_path, move |conn| {
+            Box::pin(async move {
+                let upper = sql.to_uppercase();
+                let is_select = upper.starts_with("SELECT") || upper.starts_with("PRAGMA") || upper.starts_with("EXPLAIN");
+
+                if is_select {
+                    let mut rows = conn
+                        .query(&sql, Vec::<turso::Value>::new())
+                        .await
+                        .map_err(|e| lang::ERR_QUERY_FAIL.replace("{}", &e.to_string()))?;
+
+                    // 尝试从第一行列推断列名
+                    let mut cols = Vec::new();
+                    let mut data = Vec::new();
+                    let mut first = true;
+                    while let Ok(Some(row)) = rows.next().await {
+                        if first {
+                            // 列数 = column_count
+                            for i in 0.. {
+                                match row.get_value(i) {
+                                    Ok(_) => cols.push(format!("col{}", i)),
+                                    Err(_) => break,
+                                }
+                            }
+                            first = false;
+                        }
+                        let mut rd = Vec::new();
+                        for i in 0..cols.len() {
+                            rd.push(value_to_string(&row, i));
+                        }
+                        data.push(rd);
+                    }
+                    let row_count = data.len();
+                    Ok((Vec::new(), None, data, cols, row_count, None))
+                } else {
+                    // 非 SELECT 语句（INSERT/UPDATE/DELETE 等）
+                    conn.execute(&sql, Vec::<turso::Value>::new())
+                        .await
+                        .map_err(|e| lang::ERR_EXEC_FAIL.replace("{}", &e.to_string()))?;
+                    Ok((Vec::new(), None, Vec::new(), Vec::new(), 0, None))
+                }
+            })
+        })?;
+
+        self.table_data = data;
+        self.column_names = cols;
+        self.visible_columns = vec![true; self.column_names.len()];
+        self.row_count = row_count;
+        self.selected_table = None;
+        self.selected_row = None;
+        self.page_offset = 0;
+        self.error_message = err;
+        Ok(())
+    }
+
     /// 翻页加载数据
     pub fn load_page(&mut self, offset: usize) -> Result<(), String> {
         let table_name = match self.selected_table.clone() {
@@ -314,7 +354,7 @@ impl TursoViewer {
                 let mut rows = conn
                     .query(&format!("SELECT * FROM {} LIMIT {} OFFSET {}", name, page_size, offset), Vec::<turso::Value>::new())
                     .await
-                    .map_err(|e| format!("查询表数据失败: {}", e))?;
+                    .map_err(|e| lang::ERR_QUERY_DATA.replace("{}", &e.to_string()))?;
 
                 let mut data = Vec::new();
                 while let Ok(Some(row)) = rows.next().await {

@@ -21,12 +21,20 @@ path = "src/main.rs"
 [package.metadata.winres]
 OriginalFilename = "qi-toolbox.exe"
 
+[features]
+default = []
+english = []
+
 [dependencies]
 eframe = "0.34"
 egui = "0.34"
 egui_extras = "0.34"
 egui-cjk-font = "0.2"
 bcrypt = "0.15"
+argon2 = "0.5"
+pbkdf2 = { version = "0.12", features = ["hmac"] }
+sha2 = "0.10"
+base64ct = { version = "1", features = ["alloc"] }
 getrandom = "0.2"
 totp-rs = { version = "5", features = ["gen_secret", "otpauth"] }
 qrcode = "0.14"

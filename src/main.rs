@@ -2,10 +2,12 @@
 
 #![windows_subsystem = "windows"]
 
-mod bcrypt_tool;
-mod totp_tool;
+mod password;
+mod totp;
 mod turso_viewer;
 mod datatable;
+mod strings;
+mod sql_editor;
 mod ui;
 
 #[cfg(windows)]

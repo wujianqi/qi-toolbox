@@ -1,6 +1,7 @@
 //! 数据表列表与数据表格渲染
 
 use crate::turso_viewer;
+use crate::strings::lang;
 use egui::{RichText, ScrollArea};
 use egui::scroll_area::ScrollBarVisibility;
 use std::rc::Rc;
@@ -12,7 +13,7 @@ pub fn render_table_list(viewer: &mut turso_viewer::TursoViewer, ui: &mut egui::
         ui.set_max_width(180.0);
 
         ui.label(
-            RichText::new(format!("表列表 ({})", viewer.tables.len()))
+            RichText::new(lang::DT_TABLE_LIST.replace("{}", &viewer.tables.len().to_string()))
                 .size(13.0)
                 .strong(),
         );
@@ -57,7 +58,7 @@ pub fn render_data_table(viewer: &mut turso_viewer::TursoViewer, ui: &mut egui::
             ui.vertical_centered(|ui| {
                 ui.add_space(50.0);
                 ui.label(
-                    RichText::new("请先连接数据库并选择一个表")
+                    RichText::new(lang::DT_NO_TABLE)
                         .size(13.0)
                         .weak(),
                 );
@@ -73,18 +74,18 @@ pub fn render_data_table(viewer: &mut turso_viewer::TursoViewer, ui: &mut egui::
                 .unwrap_or("");
             ui.label(RichText::new(table_name).size(13.0).strong());
             ui.label(
-                RichText::new(format!(
-                    "| {} 列 | {} 行",
-                    viewer.column_names.len(),
-                    viewer.row_count,
-                ))
+                RichText::new(lang::DT_COL_ROW
+                    .replace("{}", &viewer.column_names.len().to_string())
+                    .replacen("{}", &viewer.row_count.to_string(), 1))
                 .size(11.0)
                 .weak(),
             );
             // 列过滤 popup
             let visible_count = viewer.visible_columns.iter().filter(|&&v| v).count();
             let total = viewer.column_names.len();
-            let label = format!("\u{2699} 列 ({}/{})", visible_count, total);
+            let label = lang::DT_COLUMNS
+                .replace("{}", &visible_count.to_string())
+                .replacen("{}", &total.to_string(), 1);
             ui.menu_button(RichText::new(label).size(11.0), |ui| {
                 for (i, col_name) in viewer.column_names.iter().enumerate() {
                     if i < viewer.visible_columns.len() {
@@ -107,12 +108,14 @@ pub fn render_data_table(viewer: &mut turso_viewer::TursoViewer, ui: &mut egui::
                 let can_prev = offset > 0;
                 let can_next = offset + page_size < total;
 
-                if ui.add_enabled(can_prev, egui::Button::new(RichText::new("\u{25C0} 上一页").size(11.0))).clicked() {
+                if ui.add_enabled(can_prev, egui::Button::new(RichText::new(lang::DT_PREV).size(11.0))).clicked() {
                     let new_offset = offset.saturating_sub(page_size);
                     let _ = viewer.load_page(new_offset);
                 }
-                ui.label(RichText::new(format!("第 {} / {} 页", page, total_pages)).size(11.0).weak());
-                if ui.add_enabled(can_next, egui::Button::new(RichText::new("下一页 \u{25B6}").size(11.0))).clicked() {
+                ui.label(RichText::new(lang::DT_PAGE
+                    .replace("{}", &page.to_string())
+                    .replacen("{}", &total_pages.to_string(), 1)).size(11.0).weak());
+                if ui.add_enabled(can_next, egui::Button::new(RichText::new(lang::DT_NEXT).size(11.0))).clicked() {
                     let new_offset = offset + page_size;
                     let _ = viewer.load_page(new_offset);
                 }
@@ -126,12 +129,12 @@ pub fn render_data_table(viewer: &mut turso_viewer::TursoViewer, ui: &mut egui::
             // 详情视图 - 只需要一行数据，用 Rc 包装避免深拷贝
             if sel_row < viewer.table_data.len() {
                 ui.horizontal(|ui| {
-                    if ui.button("\u{2190} 返回列表").clicked() {
+                    if ui.button(lang::DT_BACK).clicked() {
                         viewer.selected_row = None;
                         return;
                     }
                     ui.label(
-                        RichText::new(format!("行 {} 详情", sel_row + 1))
+                        RichText::new(lang::DT_ROW_DETAIL.replace("{}", &(sel_row + 1).to_string()))
                             .size(13.0)
                             .strong(),
                     );

@@ -1,4 +1,5 @@
 /target
+/release
 *.exe
 *.pdb
 *.ilk
@@ -8,5 +9,6 @@
 *.exp
 *.log
 *.tmp
+.serena
 qi_key.txt
 code.bat
