@@ -5,7 +5,48 @@
 
 use std::time::{SystemTime, UNIX_EPOCH};
 use totp_rs::{Algorithm, Secret, TOTP};
-use qrcode::QrCode;
+
+// 二维码像素数据与通用编码在 `core::qr` 实现（TOTP 与远程检测共用）；
+// re-export 保持本模块 API 兼容（`totp::QrEntry` 仍可引用）
+pub use crate::core::qr::QrEntry;
+use crate::core::qr::qr_rgba;
+
+/// TOTP 算法下拉索引 → Algorithm
+pub fn algo_from_index(index: usize) -> Algorithm {
+    match index {
+        1 => Algorithm::SHA256,
+        2 => Algorithm::SHA512,
+        _ => Algorithm::SHA1,
+    }
+}
+
+/// 读取已保存的密钥文件（不存在时返回空串）
+pub fn load_saved_key() -> String {
+    std::fs::read_to_string("qi_key.txt")
+        .map(|k| k.trim().to_string())
+        .unwrap_or_default()
+}
+
+/// 生成二维码 RGBA 数据并包装为 QrEntry（catch_unwind 防 panic 崩溃）
+pub fn generate_qr_entry(
+    secret_key: &str,
+    account_name: &str,
+    issuer: &str,
+    algorithm: Algorithm,
+) -> Option<QrEntry> {
+    let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(move || {
+        generate_qr_code_data(secret_key, account_name, issuer, algorithm)
+    }));
+    match result {
+        Ok(Ok((rgba, w, h))) => Some(QrEntry {
+            id: 0,
+            rgba,
+            w,
+            h,
+        }),
+        _ => None,
+    }
+}
 
 /// 生成随机的 Base32 编码密钥（20字节 = 160位）
 pub fn generate_secret_key() -> String {
@@ -34,7 +75,7 @@ pub fn generate_totp(secret_key: &str, algorithm: Algorithm) -> Result<String, S
     generate_totp_with_time_step(secret_key, algorithm, 0)
 }
 
-/// 运行 TOTP 工具并返回输出字符串
+/// 生成 TOTP 验证码并返回输出字符串
 pub fn run(secret_key: &str, algorithm: Algorithm) -> String {
     match generate_totp(secret_key, algorithm) {
         Ok(code) => code,
@@ -60,34 +101,8 @@ pub fn generate_qr_code_data(secret_key: &str, account_name: &str, issuer: &str,
 
     let otpauth_uri = totp.get_url();
 
-    let code = QrCode::new(otpauth_uri.as_bytes())
-        .map_err(|e| format!("Failed to generate QR code: {}", e))?;
-
-    let modules = code.to_colors();
-    let total_size = modules.len();
-    let module_count = (total_size as f64).sqrt() as usize;
-
-    let scale = 4;
-    let width = (module_count * scale) as u32;
-    let height = (module_count * scale) as u32;
-
-    let mut rgba = Vec::with_capacity((width as usize * height as usize * 4) as usize);
-    for y in 0..module_count {
-        for _sy in 0..scale {
-            for x in 0..module_count {
-                let idx = y * module_count + x;
-                let value = if idx < total_size && modules[idx] == qrcode::Color::Dark { 0 } else { 255 };
-                for _sx in 0..scale {
-                    rgba.push(value);
-                    rgba.push(value);
-                    rgba.push(value);
-                    rgba.push(255); // alpha
-                }
-            }
-        }
-    }
-
-    Ok((rgba, width, height))
+    // 通用 RGBA 编码（放大 4 倍）在 core::qr 中实现，与远程检测端点二维码共用
+    qr_rgba(&otpauth_uri).map_err(|e| format!("Failed to generate QR code: {}", e))
 }
 
 /// 解码 Base32 密钥为字节数组（与后端相同）

@@ -10,7 +10,7 @@
 
 ## 中文
 
-轻量级桌面工具集，基于 Rust + egui 构建，提供 2FA 验证码生成、账号密码加密、Turso 数据库浏览三大功能。
+轻量级桌面工具集，基于 Rust + windui 构建，提供 2FA 验证码生成、账号密码加密、Turso 数据库浏览、SFTP 文件管理、远程检测五大功能。
 
 ### 功能
 
@@ -36,12 +36,27 @@
 - 内置 SQL 查询编辑器，支持语法高亮
 - 行详情查看模式
 
+#### SFTP 文件管理
+
+- SSH 密码认证连接，文件列表浏览（目录优先排序）
+- 上传 / 下载 / 新建文件夹 / 删除，大文件分块流式传输
+- 复用 SSH 会话执行远程命令
+- 内置部署 / 维护常用命令模板（系统状态、服务管理、部署容器、网络），点选即填入命令框
+
+#### 远程检测
+
+- 支持 http / https / ws / wss / ftp 地址自动解析（缺省按 https，端口可携带）
+- 连接：TCP 建连（加密协议自动 TLS 握手），返回 RTT 与解析到的 IP
+- Ping：连测 3 次，输出最小 / 平均 / 最大时延
+- SSL 证书状态：证书链校验 + 主题 / 签发者 / 有效期 / 剩余天数（仅 https/wss）
+- 网页状态：HTTP 状态码 / 响应大小 / 耗时，自动跟随重定向（仅 http/https）
+- 端点二维码：一键生成当前地址二维码，扫码即可分发
+
 ### 预编译下载
 
 前往 [Releases](https://github.com/wujianqi/qi-toolbox/releases) 页面下载最新版本。
 
-- `qi-toolbox_cn.exe` — 中文版
-- `qi-toolbox_en.exe` — 英文版
+- `qi-toolbox.exe` — 单包双语言：启动跟随系统语言（中文系统→中文，否则英文），可在主面板侧栏底部「中 / EN」手动切换
 
 ### 从源码编译
 
@@ -57,12 +72,9 @@ cargo build
 
 # Release 版本（体积优化）
 cargo build --release
-
-# 英文版
-cargo build --release --features english
 ```
 
-#### 一键构建双语发布版
+#### 一键构建发布版
 
 ```powershell
 # Windows (PowerShell)
@@ -76,35 +88,49 @@ bash build_release.sh
 
 ```
 release/
-├── qi-toolbox_cn.exe    # 中文版
-├── qi-toolbox_en.exe    # 英文版
+├── qi-toolbox.exe    # 单包双语言（跟随系统，可在应用内切换）
 └── README.md
 ```
 
 ### 项目结构
 
+分层设计：`core/` 业务层（纯逻辑，不依赖 UI 框架）+ `ui/` 界面层（windui），板块按页独立，便于扩展。
+
 ```
 src/
-├── main.rs           # 入口，窗口初始化
-├── ui.rs             # 界面布局与交互逻辑
-├── strings.rs        # 国际化字符串（中文 / 英文）
-├── sql_editor.rs     # SQL 语法高亮编辑器
-├── password.rs       # 密码哈希算法（Argon2id / Bcrypt / PBKDF2）
-├── totp.rs           # TOTP 密钥生成、验证码计算、二维码生成
-├── turso_viewer.rs   # Turso/libSQL 数据库连接与查询
-└── datatable.rs      # 数据表格渲染（表列表、分页、详情视图）
+├── main.rs           # 入口：平台初始化 + 启动 UI
+├── lang.rs           # 国际化文案（中文 / 英文，运行时切换）
+├── core/             # 业务层（不依赖 windui）
+│   ├── totp.rs       # TOTP 密钥生成、验证码计算、二维码数据
+│   ├── password.rs   # 密码哈希（Argon2id / Bcrypt / PBKDF2）
+│   ├── sftp.rs       # SFTP 工作线程（SSH/SFTP 命令协议）
+│   ├── turso.rs      # Turso/libSQL 数据库连接与查询
+│   ├── db.rs         # 数据库后台任务编排（消息协议 + 线程）
+│   └── remote.rs     # 远程检测（URL 解析 / Ping / SSL / 网页状态）
+└── ui/               # 界面层（windui，仅渲染与交互）
+    ├── mod.rs        # 入口 + AppState（页面状态聚合）
+    ├── widgets.rs    # 共享组件（卡片 / 导航 / 主题切换 / 关于）
+    ├── table.rs      # 数据表格渲染（表列表 / 分页 / 详情视图）
+    ├── sql.rs        # SQL 查询面板
+    ├── totp.rs       # TOTP 页
+    ├── password.rs   # 密码页
+    ├── turso.rs      # Turso 页
+    ├── sftp.rs       # SFTP 页
+    └── remote.rs     # 远程检测页
 ```
 
 ### 技术栈
 
 - [Rust](https://www.rust-lang.org/) — 系统语言
-- [egui](https://github.com/emilk/egui) — 即时模式 GUI 框架
+- [windui](https://crates.io/crates/windui) — Windows 原生 GUI 框架
 - [totp-rs](https://github.com/constverif/totp-rs) — TOTP 算法实现
 - [argon2](https://github.com/RustCrypto/password-hashes) — Argon2id 哈希
 - [bcrypt](https://github.com/Keats/rust-bcrypt) — Bcrypt 加密
 - [pbkdf2](https://github.com/RustCrypto/password-hashes) — PBKDF2 哈希
 - [turso](https://github.com/tursodatabase/turso-client-rust) — Turso/libSQL 客户端
 - [qrcode](https://github.com/mynanism/qrcode-rust) — 二维码生成
+- [russh](https://github.com/warp-tech/russh) — SSH / SFTP 客户端
+- [native-tls](https://github.com/sfackler/rust-native-tls) — TLS 证书校验
 
 ### 许可证
 
@@ -116,7 +142,7 @@ src/
 
 ## English
 
-Lightweight desktop toolbox built with Rust + egui, providing 2FA authenticator, password hashing, and Turso database browsing.
+Lightweight desktop toolbox built with Rust + windui, providing 2FA authenticator, password hashing, Turso database browsing, SFTP file manager, and remote check.
 
 ### Features
 
@@ -142,12 +168,27 @@ Lightweight desktop toolbox built with Rust + egui, providing 2FA authenticator,
 - Built-in SQL query editor with syntax highlighting
 - Row detail view
 
+#### SFTP File Manager
+
+- Password-authenticated SSH connections, directory listing (directories first)
+- Upload / download / mkdir / delete, chunked streaming for large files
+- Run remote commands over the existing SSH session
+- Built-in deploy/maintenance command templates (system, services, deploy & containers, network), click to fill the command box
+
+#### Remote Check
+
+- Auto-parse http / https / ws / wss / ftp URLs (defaults to https, port supported)
+- Connect: TCP handshake (auto TLS for encrypted schemes), reports RTT and resolved IP
+- Ping: 3 probes with min / avg / max latency
+- SSL certificate: chain validation + subject / issuer / validity / days left (https/wss only)
+- Web status: HTTP status code / size / elapsed, follows redirects (http/https only)
+- Endpoint QR code: one-click QR for the current URL, scan to share
+
 ### Download
 
 Visit the [Releases](https://github.com/wujianqi/qi-toolbox/releases) page.
 
-- `qi-toolbox_cn.exe` — Chinese version
-- `qi-toolbox_en.exe` — English version
+- `qi-toolbox.exe` — Single package with built-in zh/en: follows the system language on startup (Chinese system → Chinese, otherwise English), switchable via the 中/EN toggle at the sidebar bottom
 
 ### Build from Source
 
@@ -163,12 +204,9 @@ cargo build
 
 # Release (optimized)
 cargo build --release
-
-# English version
-cargo build --release --features english
 ```
 
-#### Build Both Languages for Release
+#### Build for Release
 
 ```powershell
 # Windows (PowerShell)
@@ -182,35 +220,49 @@ Output in `release/`:
 
 ```
 release/
-├── qi-toolbox_cn.exe    # Chinese
-├── qi-toolbox_en.exe    # English
+├── qi-toolbox.exe    # Single package, zh/en built-in (follows system, switchable in-app)
 └── README.md
 ```
 
 ### Project Structure
 
+Layered design: `core/` business layer (pure logic, no UI framework) + `ui/` presentation layer (windui). Each feature lives in its own page module for easy extension.
+
 ```
 src/
-├── main.rs           # Entry point, window setup
-├── ui.rs             # UI layout and interaction
-├── strings.rs        # Internationalization strings (zh / en)
-├── sql_editor.rs     # SQL syntax highlighting editor
-├── password.rs       # Password hashing (Argon2id / Bcrypt / PBKDF2)
-├── totp.rs           # TOTP key generation, code calculation, QR codes
-├── turso_viewer.rs   # Turso/libSQL database connection and queries
-└── datatable.rs      # Data table rendering (list, pagination, detail view)
+├── main.rs           # Entry point: platform init + launch UI
+├── lang.rs           # i18n strings (zh / en, runtime switch)
+├── core/             # Business layer (windui-free)
+│   ├── totp.rs       # TOTP key generation, code calculation, QR data
+│   ├── password.rs   # Password hashing (Argon2id / Bcrypt / PBKDF2)
+│   ├── sftp.rs       # SFTP worker thread (SSH/SFTP command protocol)
+│   ├── turso.rs      # Turso/libSQL database connection and queries
+│   ├── db.rs         # Database background tasks (message protocol + threads)
+│   └── remote.rs     # Remote check (URL parse / Ping / SSL / web status)
+└── ui/               # Presentation layer (windui, rendering & interaction only)
+    ├── mod.rs        # Entry + AppState (page state aggregation)
+    ├── widgets.rs    # Shared components (card / nav / theme toggle / about)
+    ├── table.rs      # Data table rendering (list / pagination / detail)
+    ├── sql.rs        # SQL query panel
+    ├── totp.rs       # TOTP page
+    ├── password.rs   # Password page
+    ├── turso.rs      # Turso page
+    ├── sftp.rs       # SFTP page
+    └── remote.rs     # Remote check page
 ```
 
 ### Tech Stack
 
 - [Rust](https://www.rust-lang.org/) — Systems language
-- [egui](https://github.com/emilk/egui) — Immediate-mode GUI framework
+- [windui](https://crates.io/crates/windui) — Native Windows GUI framework
 - [totp-rs](https://github.com/constverif/totp-rs) — TOTP algorithm
 - [argon2](https://github.com/RustCrypto/password-hashes) — Argon2id hashing
 - [bcrypt](https://github.com/Keats/rust-bcrypt) — Bcrypt encryption
 - [pbkdf2](https://github.com/RustCrypto/password-hashes) — PBKDF2 hashing
 - [turso](https://github.com/tursodatabase/turso-client-rust) — Turso/libSQL client
 - [qrcode](https://github.com/mynanism/qrcode-rust) — QR code generation
+- [russh](https://github.com/warp-tech/russh) — SSH / SFTP client
+- [native-tls](https://github.com/sfackler/rust-native-tls) — TLS certificate validation
 
 ### License
 

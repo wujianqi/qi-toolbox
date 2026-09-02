@@ -1,7 +1,7 @@
 use argon2::Argon2;
 use base64ct::{Base64, Encoding};
 use sha2::Sha256;
-use crate::strings::lang;
+use crate::lang;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum HashAlgorithm {
@@ -20,14 +20,6 @@ impl HashAlgorithm {
             HashAlgorithm::Argon2id => "Argon2id",
             HashAlgorithm::Bcrypt => "Bcrypt",
             HashAlgorithm::Pbkdf2 => "PBKDF2",
-        }
-    }
-
-    pub fn description(&self) -> &'static str {
-        match self {
-            HashAlgorithm::Argon2id => lang::ALGO_ARGON2,
-            HashAlgorithm::Bcrypt => lang::ALGO_BCRYPT,
-            HashAlgorithm::Pbkdf2 => lang::ALGO_PBKDF2,
         }
     }
 }
@@ -63,15 +55,15 @@ impl PlatformPreset {
 
     pub fn label(&self) -> &'static str {
         match self {
-            PlatformPreset::None => lang::PLAT_NONE,
-            PlatformPreset::Laravel => lang::PLAT_LARAVEL,
-            PlatformPreset::Django => lang::PLAT_DJANGO,
-            PlatformPreset::Spring => lang::PLAT_SPRING,
-            PlatformPreset::Express => lang::PLAT_EXPRESS,
-            PlatformPreset::Dotnet => lang::PLAT_DOTNET,
-            PlatformPreset::Rails => lang::PLAT_RAILS,
-            PlatformPreset::WordPress => lang::PLAT_WORDPRESS,
-            PlatformPreset::Go => lang::PLAT_GO,
+            PlatformPreset::None => lang::PLAT_NONE(),
+            PlatformPreset::Laravel => lang::PLAT_LARAVEL(),
+            PlatformPreset::Django => lang::PLAT_DJANGO(),
+            PlatformPreset::Spring => lang::PLAT_SPRING(),
+            PlatformPreset::Express => lang::PLAT_EXPRESS(),
+            PlatformPreset::Dotnet => lang::PLAT_DOTNET(),
+            PlatformPreset::Rails => lang::PLAT_RAILS(),
+            PlatformPreset::WordPress => lang::PLAT_WORDPRESS(),
+            PlatformPreset::Go => lang::PLAT_GO(),
         }
     }
 
@@ -89,21 +81,6 @@ impl PlatformPreset {
             PlatformPreset::Go => HashAlgorithm::Bcrypt,
         }
     }
-
-    /// 该平台的补充说明
-    pub fn note(&self) -> &'static str {
-        match self {
-            PlatformPreset::None => lang::NOTE_NONE,
-            PlatformPreset::Laravel => lang::NOTE_LARAVEL,
-            PlatformPreset::Django => lang::NOTE_DJANGO,
-            PlatformPreset::Spring => lang::NOTE_SPRING,
-            PlatformPreset::Express => lang::NOTE_EXPRESS,
-            PlatformPreset::Dotnet => lang::NOTE_DOTNET,
-            PlatformPreset::Rails => lang::NOTE_RAILS,
-            PlatformPreset::WordPress => lang::NOTE_WORDPRESS,
-            PlatformPreset::Go => lang::NOTE_GO,
-        }
-    }
 }
 
 pub fn hash_password(password: &str, algorithm: HashAlgorithm) -> Result<String, String> {
@@ -114,26 +91,77 @@ pub fn hash_password(password: &str, algorithm: HashAlgorithm) -> Result<String,
     }
 }
 
+/// 生成随机密码，保证包含大小写字母、数字、特殊字符各至少一个。
+/// 字符与洗牌索引均用拒绝采样（rejection sampling）取均匀随机数，消除取模偏差；
+/// 全程按字节操作，避免逐类别建 `Vec<char>` 的重复分配。
+pub fn generate_random_password(length: usize) -> Result<String, String> {
+    const ALL: &[u8] = b"abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789!@#$%^&*";
+    const LOWER: &[u8] = b"abcdefghijklmnopqrstuvwxyz";
+    const UPPER: &[u8] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZ";
+    const DIGITS: &[u8] = b"0123456789";
+    const SPECIAL: &[u8] = b"!@#$%^&*";
+
+    let len = length.max(8);
+    let mut bytes = vec![0u8; len];
+    getrandom::getrandom(&mut bytes).map_err(|e| format!("RNG error: {}", e))?;
+
+    // 拒绝采样：均匀取 [0, n) 索引；字节流耗尽时补充熵源（首次失败已在上方上报）
+    let mut pos = 0usize;
+    let mut uniform = move |n: usize| -> usize {
+        let limit = 256 - (256 % n);
+        loop {
+            if pos >= bytes.len() {
+                let mut extra = [0u8; 64];
+                if getrandom::getrandom(&mut extra).is_err() {
+                    return 0; // 极端失败：降级取 0，不阻断生成
+                }
+                bytes.extend_from_slice(&extra);
+            }
+            let b = bytes[pos] as usize;
+            pos += 1;
+            if b < limit {
+                return b % n;
+            }
+        }
+    };
+
+    let mut chars: Vec<char> = Vec::with_capacity(len);
+    chars.push(LOWER[uniform(LOWER.len())] as char);
+    chars.push(UPPER[uniform(UPPER.len())] as char);
+    chars.push(DIGITS[uniform(DIGITS.len())] as char);
+    chars.push(SPECIAL[uniform(SPECIAL.len())] as char);
+    for _ in 4..len {
+        chars.push(ALL[uniform(ALL.len())] as char);
+    }
+    // Fisher–Yates 洗牌（均匀索引），打乱前四个固定类别位
+    for i in (1..chars.len()).rev() {
+        let j = uniform(i + 1);
+        chars.swap(i, j);
+    }
+    Ok(chars.into_iter().collect())
+}
+
 /// Argon2id — PHC 格式，兼容 PHP password_hash / Python argon2-cffi / Go golang.org/x/crypto
 ///
 /// 格式: $argon2id$v=19$m=<memory>,t=<time>,p=<parallelism>$<salt_b64>$<hash_b64>
 /// 参数: m=19456 (19 MiB), t=2, p=1 — OWASP 2024 最低推荐值
 fn hash_argon2id(password: &str) -> Result<String, String> {
     let mut salt = [0u8; 16];
-    getrandom::getrandom(&mut salt).map_err(|e| lang::ERR_SALT.replace("{}", &e.to_string()))?;
+    getrandom::getrandom(&mut salt).map_err(|e| lang::ERR_SALT().replace("{}", &e.to_string()))?;
     let salt_b64 = Base64::encode_string(&salt);
 
     let params = argon2::Params::new(19456, 2, 1, None)
-        .map_err(|e| lang::ERR_ARGON2_PARAM.replace("{}", &e.to_string()))?;
+        .map_err(|e| lang::ERR_ARGON2_PARAM().replace("{}", &e.to_string()))?;
     let argon2 = Argon2::new(argon2::Algorithm::Argon2id, argon2::Version::V0x13, params);
 
     let mut output = [0u8; 32];
     argon2
         .hash_password_into(password.as_bytes(), &salt, &mut output)
-        .map_err(|e| lang::ERR_ARGON2_HASH.replace("{}", &e.to_string()))?;
+        .map_err(|e| lang::ERR_ARGON2_HASH().replace("{}", &e.to_string()))?;
 
-    // PHC 标准: hash 用 base64 不带 padding
-    let hash_b64 = Base64::encode_string(&output).trim_end_matches('=').to_string();
+    // PHC 标准: hash 用 base64 不带 padding（命名绑定延长 String 存活期，省一次 to_string）
+    let hash_b64 = Base64::encode_string(&output);
+    let hash_b64 = hash_b64.trim_end_matches('=');
 
     Ok(format!(
         "$argon2id$v=19$m=19456,t=2,p=1${}${}",
@@ -146,7 +174,7 @@ fn hash_argon2id(password: &str) -> Result<String, String> {
 /// 格式: $2b$<cost>$<salt_and_hash> (由 bcrypt crate 自动生成)
 /// cost=12 — OWASP 推荐值
 fn hash_bcrypt(password: &str) -> Result<String, String> {
-    bcrypt::hash(password, 12).map_err(|e| lang::ERR_BCRYPT_HASH.replace("{}", &e.to_string()))
+    bcrypt::hash(password, 12).map_err(|e| lang::ERR_BCRYPT_HASH().replace("{}", &e.to_string()))
 }
 
 /// PBKDF2-SHA256 — 兼容 Django / Laravel / Python passlib
@@ -155,7 +183,7 @@ fn hash_bcrypt(password: &str) -> Result<String, String> {
 /// 600,000 轮 — OWASP 2024 推荐值
 fn hash_pbkdf2(password: &str) -> Result<String, String> {
     let mut salt = [0u8; 16];
-    getrandom::getrandom(&mut salt).map_err(|e| lang::ERR_SALT.replace("{}", &e.to_string()))?;
+    getrandom::getrandom(&mut salt).map_err(|e| lang::ERR_SALT().replace("{}", &e.to_string()))?;
     let salt_b64 = Base64::encode_string(&salt);
 
     let rounds: u32 = 600_000;
