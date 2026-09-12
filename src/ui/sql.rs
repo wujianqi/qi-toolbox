@@ -1,13 +1,13 @@
 //! SQL 查询面板（windui 版，UI 层）
 //!
-//! 多行输入（等宽字体）+ 执行/清空按钮 + 状态栏。windui 的 text_input
-//! 不提供自定义 layouter，故不做语法高亮，仅用等宽字体呈现。
+//! 多行输入（`SyntaxInput`，SQL 语法高亮、等宽字体）+ 执行/清空按钮 + 状态栏。
 //! SQL 在后台线程执行（`core::db::spawn_execute_sql`），结果经 channel 回 UI 线程。
 
 use windui::prelude::*;
 
 use super::icons;
 use super::sink;
+use super::syntax_input::{LexerKind, SyntaxInput};
 use crate::core;
 use crate::core::turso::TursoSource;
 use crate::lang;
@@ -68,9 +68,14 @@ pub fn render_sql_panel(
                 .child(exec),
         )
         .child(
-            Element::text_input(sql_query, "SELECT * FROM table_name WHERE ...")
-                .multiline()
-                .wrap(false)
+            // SyntaxInput：SQL 语法高亮、多行（回车换行）、超宽行横向滚动。
+            // 字号/字族经 style 传给 widget，与文本输入框同一套外观语义。
+            Element::leaf()
+                .widget(SyntaxInput::new(
+                    sql_query,
+                    "SELECT * FROM table_name WHERE ...",
+                    LexerKind::Sql,
+                ))
                 .font_family("Consolas")
                 .font_size(13.0)
                 .width_match()

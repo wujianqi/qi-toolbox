@@ -8,11 +8,12 @@ pub enum HashAlgorithm {
     Argon2id,
     Bcrypt,
     Pbkdf2,
+    Md5,
 }
 
 impl HashAlgorithm {
     pub fn all() -> &'static [HashAlgorithm] {
-        &[HashAlgorithm::Argon2id, HashAlgorithm::Bcrypt, HashAlgorithm::Pbkdf2]
+        &[HashAlgorithm::Argon2id, HashAlgorithm::Bcrypt, HashAlgorithm::Pbkdf2, HashAlgorithm::Md5]
     }
 
     pub fn label(&self) -> &'static str {
@@ -20,6 +21,7 @@ impl HashAlgorithm {
             HashAlgorithm::Argon2id => "Argon2id",
             HashAlgorithm::Bcrypt => "Bcrypt",
             HashAlgorithm::Pbkdf2 => "PBKDF2",
+            HashAlgorithm::Md5 => "MD5",
         }
     }
 }
@@ -88,6 +90,7 @@ pub fn hash_password(password: &str, algorithm: HashAlgorithm) -> Result<String,
         HashAlgorithm::Argon2id => hash_argon2id(password),
         HashAlgorithm::Bcrypt => hash_bcrypt(password),
         HashAlgorithm::Pbkdf2 => hash_pbkdf2(password),
+        HashAlgorithm::Md5 => hash_md5(password),
     }
 }
 
@@ -196,4 +199,9 @@ fn hash_pbkdf2(password: &str) -> Result<String, String> {
         "$pbkdf2-sha256${}${}${}",
         rounds, salt_b64, hash_b64
     ))
+}
+
+/// MD5 — 十六进制摘要（无盐无格式）。仅用于兼容遗留系统，不提供安全性。
+fn hash_md5(password: &str) -> Result<String, String> {
+    Ok(format!("{:x}", md5::compute(password.as_bytes())))
 }

@@ -8,7 +8,7 @@ use std::rc::Rc;
 
 use windui::prelude::*;
 
-use super::{card, icons, input_dialog, sink};
+use super::{card, icons, input_dialog, select_text, sink};
 use crate::core;
 use crate::core::qr::QrEntry;
 use crate::core::remote::{self, RemoteEndpoint};
@@ -31,8 +31,12 @@ pub struct RemoteUi {
     pub result: Signal<String>,
     /// 端点二维码弹窗显隐
     pub show_qr: Signal<bool>,
-    /// 端点二维码像素（0 或 1 条，生成后弹窗显示）
+    /// 二维码像素（0 或 1 条，生成后弹窗显示）
     pub qr: Signal<Vec<QrEntry>>,
+    /// 二维码弹窗内网址输入（已连接默认带入连接网址，可手动修改）
+    pub qr_url: Signal<String>,
+    /// 二维码弹窗内错误（输入为空/生成失败就地提示）
+    pub qr_error: Signal<String>,
     /// 后台任务结果通道（`App::channel` 创建后回填）
     tx: Rc<RefCell<Option<Sender<core::remote::RemoteMsg>>>>,
     /// 当前已解析端点（连接成功后回填，Ping/SSL/网页状态复用）
@@ -51,6 +55,8 @@ impl RemoteUi {
             result: signal(String::new()),
             show_qr: signal(false),
             qr: signal(Vec::new()),
+            qr_url: signal(String::new()),
+            qr_error: signal(String::new()),
             tx: Rc::new(RefCell::new(None)),
             endpoint: Rc::new(RefCell::new(None)),
         }
@@ -168,7 +174,7 @@ impl Default for RemoteUi {
     }
 }
 
-/// 远程检测页：连接（弹窗输入网址）+ Ping + SSL 证书状态 + 网页状态
+/// 远程检测页：连接（弹窗输入网址）+ Ping + SSL 证书状态 + 网页状态 + 网址二维码
 pub fn build_remote_tab(ui: &RemoteUi) -> Element {
     let RemoteUi {
         show_conn,
@@ -180,6 +186,8 @@ pub fn build_remote_tab(ui: &RemoteUi) -> Element {
         result,
         show_qr,
         qr,
+        qr_url,
+        qr_error,
         ..
     } = ui.clone();
     let tx = ui.tx();
@@ -192,9 +200,11 @@ pub fn build_remote_tab(ui: &RemoteUi) -> Element {
         .on_click({
             let endpoint = endpoint.clone();
             move |_| {
-                // 再次连接时预填当前端点（便于改端口/路径重连）
-                let ep = endpoint.borrow().clone();
-                url_input.set(ep.map(|e| e.display).unwrap_or_default());
+                // 再次连接时预填当前端点（便于改端口/路径重连）；
+                // 无已连接端点时保留输入框现值（含启动时回填的上次网址）
+                if let Some(ep) = endpoint.borrow().clone() {
+                    url_input.set(ep.display);
+                }
                 show_conn.set(true);
             }
         });
@@ -253,30 +263,32 @@ pub fn build_remote_tab(ui: &RemoteUi) -> Element {
             }
         });
 
-    // ── 端点二维码：生成当前地址二维码，便于扫码分发（连接后可用）──
+    // ── 网址二维码：生成任意网址的二维码，便于扫码分发。
+    // 不依赖连接（默认亮）：已连接时默认读连接网址，未连接也可手动输入网址生成。──
     let qr_btn = Element::button(lang::REMOTE_QR())
         .small()
         .neutral()
         .icon_content(icons::stateful_icon(icons::QR, Some(16)))
-        .enabled_signal(connected)
         .on_click({
             let endpoint = endpoint.clone();
             move |_| {
-                let ep = endpoint.borrow().clone();
-                if let Some(ep) = ep {
-                    match crate::core::qr::qr_rgba(&ep.display) {
-                        Ok((rgba, w, h)) => {
-                            qr.set(vec![QrEntry { id: 0, rgba, w, h }]);
-                            error.set(String::new());
-                            show_qr.set(true);
-                        }
-                        Err(e) => error.set(e),
+                qr_error.set(String::new());
+                // 已连接：弹窗内默认带入连接网址并直接生成；未连接：留空待手动输入
+                let url = endpoint.borrow().as_ref().map(|e| e.display.clone()).unwrap_or_default();
+                qr_url.set(url.clone());
+                if url.trim().is_empty() {
+                    qr.set(Vec::new());
+                } else {
+                    match crate::core::qr::qr_rgba(&url) {
+                        Ok((rgba, w, h)) => qr.set(vec![QrEntry { id: 0, rgba, w, h }]),
+                        Err(e) => qr_error.set(e),
                     }
                 }
+                show_qr.set(true);
             }
         });
 
-    // ── 工具栏：连接 / Ping / SSL / 网页状态 / 二维码 + 状态条 ──
+    // ── 工具栏：连接 / Ping / SSL / 网页状态 ‖ 二维码（不依赖连接）+ 状态条 ──
     let toolbar = Element::row()
         .width_match()
         .spacing(8)
@@ -288,8 +300,8 @@ pub fn build_remote_tab(ui: &RemoteUi) -> Element {
         .child(ping_btn)
         .child(ssl_btn)
         .child(web_btn)
-        .child(qr_btn)
         .child(Element::leaf().width(1).height(20).bg_role(Role::Divider))
+        .child(qr_btn)
         .child(Element::flex_spacer())
         .child(
             Element::label_signal(status)
@@ -326,8 +338,8 @@ pub fn build_remote_tab(ui: &RemoteUi) -> Element {
         Element::col()
             .spacing(6)
             .child(
-                Element::text_input(result, "")
-                    .multiline()
+                // 只读可选文本：结果可拖选/Ctrl+C 复制（不再借输入框承载）
+                select_text(result)
                     .font_family("Consolas")
                     .font_size(13.0)
                     .width_match()
@@ -378,6 +390,12 @@ pub fn build_remote_tab(ui: &RemoteUi) -> Element {
                         let tx = tx.clone();
                         let endpoint = endpoint.clone();
                         move |_| {
+                            // 记忆上次连接网址（尽力而为，下次启动自动回填）
+                            let url_s = url_input.get();
+                            crate::core::settings::commit(&[(
+                                "remote.url",
+                                Some(url_s.trim()),
+                            )]);
                             match remote::parse_endpoint(&url_input.get()) {
                                 Ok(ep) => {
                                     let display = ep.display.clone();
@@ -399,7 +417,8 @@ pub fn build_remote_tab(ui: &RemoteUi) -> Element {
             ),
     );
 
-    // ── 端点二维码弹窗：二维码 + 可复制地址文本（供扫码分发）──
+    // ── 网址二维码弹窗：二维码 + 可编辑网址输入。
+    // 已连接默认带入连接网址；未连接留空，可手动输入网址后点「生成」。──
     let qr_view = Element::list_signal(
         qr,
         |e: &QrEntry| e.id,
@@ -413,21 +432,36 @@ pub fn build_remote_tab(ui: &RemoteUi) -> Element {
     let qr_dialog = input_dialog(
         show_qr,
         lang::REMOTE_QR_TITLE(),
-        320,
+        380,
         move |_| show_qr.set(false),
         Element::col()
             .width_match()
-            .cross(Align::Center)
-            .spacing(12)
-            .child(qr_view)
-            // 地址用可换行/可复制的输入框承载（label 不支持 wrap，长 URL 会被裁掉）
+            .spacing(10)
+            .child(Element::col().width_match().cross(Align::Center).child(qr_view))
             .child(
-                Element::text_input(endpoint_display, "")
+                Element::label(lang::REMOTE_URL_LABEL())
+                    .font_size(12.0)
+                    .fg_role(Role::TextMuted),
+            )
+            // 网址用可换行输入框承载（label 不支持 wrap，长 URL 会被裁掉），支持手动编辑
+            .child(
+                Element::text_input(qr_url, lang::REMOTE_URL_HINT())
                     .multiline()
                     .wrap(true)
                     .font_size(12.0)
                     .width_match()
                     .height(52),
+            )
+            // 生成失败/为空就地提示（弹窗保持打开，便于修改重试）
+            .child(
+                Element::label_signal(qr_error)
+                    .font_size(11.0)
+                    .fg_role(Role::Danger),
+            )
+            .child(
+                Element::label(lang::REMOTE_QR_SUPPORT())
+                    .font_size(11.0)
+                    .fg_role(Role::TextMuted),
             ),
         Element::row()
             .width_match()
@@ -437,6 +471,24 @@ pub fn build_remote_tab(ui: &RemoteUi) -> Element {
                     .small()
                     .neutral()
                     .on_click(move |_| show_qr.set(false)),
+            )
+            .child(
+                Element::button(lang::REMOTE_QR_GEN())
+                    .small()
+                    .on_click(move |_| {
+                        let text = qr_url.get();
+                        if text.trim().is_empty() {
+                            qr_error.set(lang::REMOTE_QR_EMPTY().to_string());
+                            return;
+                        }
+                        match crate::core::qr::qr_rgba(text.trim()) {
+                            Ok((rgba, w, h)) => {
+                                qr.set(vec![QrEntry { id: 0, rgba, w, h }]);
+                                qr_error.set(String::new());
+                            }
+                            Err(e) => qr_error.set(e),
+                        }
+                    }),
             ),
     );
 
@@ -447,12 +499,6 @@ pub fn build_remote_tab(ui: &RemoteUi) -> Element {
             Element::col()
                 .padding(12)
                 .spacing(8)
-                .child(
-                    Element::label(lang::REMOTE_TITLE())
-                        .font_size(18.0)
-                        .font_weight(700)
-                        .padding_xy(8, 4),
-                )
                 .child(toolbar)
                 .child(endpoint_row)
                 .child(result_card.weight(1.0)),

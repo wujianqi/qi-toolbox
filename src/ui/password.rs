@@ -5,7 +5,7 @@
 
 use windui::prelude::*;
 
-use super::{card, icons};
+use super::{card, icons, select_text};
 use crate::core::password;
 use crate::lang;
 
@@ -46,6 +46,20 @@ pub fn build_password_tab(ui: &PasswordUi) -> Element {
         algo,
     } = ui.clone();
 
+    // 记忆本次密码页输入与选择（尽力而为：输入明文属敏感项，加密落盘）
+    let remember_pwd = |input: Signal<String>,
+                        platform: Signal<usize>,
+                        algo: Signal<usize>| {
+        let input_s = input.get();
+        let platform_s = platform.get().to_string();
+        let algo_s = algo.get().to_string();
+        crate::core::settings::commit(&[
+            ("pwd.input", Some(input_s.as_str())),
+            ("pwd.platform", Some(&platform_s)),
+            ("pwd.algo", Some(&algo_s)),
+        ]);
+    };
+
     let preset_labels: Vec<&str> =
         password::PlatformPreset::all().iter().map(|p| p.label()).collect();
     let algo_labels: Vec<&str> =
@@ -63,6 +77,8 @@ pub fn build_password_tab(ui: &PasswordUi) -> Element {
             if let Ok(pw) = password::generate_random_password(len) {
                 input.set(pw);
                 output.set(String::new());
+                // 记忆生成的明文与当前选择（明文属敏感项，加密落盘）
+                remember_pwd(input, platform, algo);
             }
         })
     };
@@ -71,6 +87,8 @@ pub fn build_password_tab(ui: &PasswordUi) -> Element {
         .neutral()
         .icon_content(icons::stateful_icon(icons::LOCK, Some(16)))
         .on_click(move |_| {
+        // 记忆本次输入与选择（明文属敏感项，加密落盘）
+        remember_pwd(input, platform, algo);
         let text = input.get().trim().to_string();
         if text.is_empty() {
             return;
@@ -132,9 +150,8 @@ pub fn build_password_tab(ui: &PasswordUi) -> Element {
     });
 
     Element::col()
-        .padding(20)
-        .spacing(14)
-        .child(Element::label(lang::PWD_TITLE()).font_size(18.0).font_weight(700))
+        .padding(16)
+        .spacing(12)
         .child(card(
             lang::PWD_CARD_SETUP(),
             Element::col()
@@ -176,9 +193,11 @@ pub fn build_password_tab(ui: &PasswordUi) -> Element {
                         .weight(1.0)
                         .spacing(6)
                         .child(Element::label(lang::PWD_OUTPUT_LABEL()).font_size(14.0))
+                        // 只读可选文本：输出可拖选/Ctrl+C 复制（不再借输入框承载）
                         .child(
-                            Element::text_input(output, "")
-                                .multiline()
+                            select_text(output)
+                                .font_family("Consolas")
+                                .font_size(13.0)
                                 .width_match()
                                 .height(120),
                         ),
@@ -188,9 +207,11 @@ pub fn build_password_tab(ui: &PasswordUi) -> Element {
                         .weight(1.0)
                         .spacing(6)
                         .child(Element::label(lang::PWD_SQL_LABEL()).font_size(14.0))
+                        // 只读可选文本：SQL 可拖选/Ctrl+C 复制（不再借输入框承载）
                         .child(
-                            Element::text_input(sql_out, "")
-                                .multiline()
+                            select_text(sql_out)
+                                .font_family("Consolas")
+                                .font_size(13.0)
                                 .width_match()
                                 .height(120),
                         ),

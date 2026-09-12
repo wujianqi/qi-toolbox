@@ -4,15 +4,23 @@
 use windui::prelude::*;
 
 use super::icons;
+use super::select_text::SelectText;
 use crate::lang;
 
 /// 侧栏导航项：图标块 + 名称，选中/未选中两棵子树叠放互斥显示，
 /// 左缘指示条作为**覆盖层**贴在行左沿。
 ///
+/// `on_switch`：点击切换后回调（模块 id），供 UI 层同步窗体标题等。
 /// 不用改 padding / border 来表达选中：那样切换时图标与文字会横向跳一下。
 /// 两态的内边距完全一致，动的只有底色、图标底色与字重/字色。
 /// （仿 windui examples/settings.rs 的 `nav_item`，字形换成 SVG 图标）
-pub fn nav_item(name: &'static str, icon: &'static [u8], i: usize, sel: Signal<usize>) -> Element {
+pub fn nav_item(
+    name: &'static str,
+    icon: &'static [u8],
+    i: usize,
+    sel: Signal<usize>,
+    on_switch: impl Fn(usize) + 'static,
+) -> Element {
     let t = windui::theme::current();
     let on_accent = Role::OnAccent.resolve(&t);
     let muted = Role::TextMuted.resolve(&t);
@@ -54,7 +62,13 @@ pub fn nav_item(name: &'static str, icon: &'static [u8], i: usize, sel: Signal<u
 
     let off = Element::row()
         .clickable()
-        .on_click(move |_| sel.set(i))
+        .on_click({
+            let on_switch = on_switch;
+            move |_| {
+                sel.set(i);
+                on_switch(i);
+            }
+        })
         .width_match()
         .height(38)
         .corner(9.0)
@@ -112,6 +126,24 @@ pub fn card(title: &str, body: Element) -> Element {
         )
         .child(Element::divider())
         .child(body)
+}
+
+/// 只读可选文本（「拓展 label」）：文本随信号变化、可选中（点击/拖拽/双击选词/三击选行/
+/// Shift+方向扩选）、可复制（Ctrl+C / 右键「复制」），但**只读**——不写信号、不可键入。
+///
+/// 用于各输出表单的文本项（2FA 验证码、Turso 详情页字段值、SSH 命令输出……）：替代
+/// 「借多行 `text_input` 承载只读输出」的旧做法（windui 没有只读+可选中的纯文本控件，
+/// [`SelectText`] 即为此补齐）。
+///
+/// **纯文字展示**：无底色、无边框、无圆角（控件自绘文字与选区，焦点时落一个光标）。
+/// `SelectText` 是真实控件（`hit_opaque`），整块 bounds 仍能吞命中收点击，故去掉底色
+/// 不丢交互。需要底色时由调用方自行加 `.bg_role(..)` 等修饰。
+/// 用法：
+/// ```ignore
+/// select_text(output).width_match().height(120)
+/// ```
+pub fn select_text(text: Signal<String>) -> Element {
+    Element::leaf().widget(SelectText::new(text))
 }
 
 /// 弹窗（带输入框专用）：同 `Element::dialog_panel`，但标题栏 ✕ 关闭按钮
@@ -187,18 +219,13 @@ pub fn theme_toggle(mode: Signal<usize>, th: ThemeHandle, epoch: Signal<Vec<()>>
 }
 
 /// 关于页面：品牌（Logo + 名称/版本）+ 功能说明 + 仓库链接。
-/// 「关于/About」字样只出现在页面标题一次；信息卡以品牌 Logo + 名称起头，
-/// 不再重复卡片标题（原实现里页面标题与卡片标题同为「关于软件」）。
+/// 模块名不再在内容区重复：已上移到窗体标题（如「启途 - 关于」），
+/// 页面首块即品牌卡（Logo + 名称起头，不再重复标题文案）。
 pub fn build_about_page() -> Element {
     let name = lang::APP_NAME();
     Element::col()
-        .padding(24)
-        .spacing(16)
-        .child(
-            Element::label(lang::ABOUT_TITLE())
-                .font_size(18.0)
-                .font_weight(700),
-        )
+        .padding(20)
+        .spacing(14)
         .child(
             Element::col()
                 .width_match()
@@ -245,6 +272,27 @@ pub fn build_about_page() -> Element {
                 )
                 .child(
                     Element::label(lang::ABOUT_BUILT())
+                        .font_size(12.0)
+                        .fg_role(Role::TextMuted),
+                )
+                .child(Element::divider())
+                .child(
+                    Element::label(lang::ABOUT_LICENSE_TITLE())
+                        .font_size(13.0)
+                        .font_weight(600),
+                )
+                .child(
+                    Element::label(lang::ABOUT_LICENSE())
+                        .font_size(12.0)
+                        .fg_role(Role::TextMuted),
+                )
+                .child(
+                    Element::label(lang::ABOUT_ICONS())
+                        .font_size(12.0)
+                        .fg_role(Role::TextMuted),
+                )
+                .child(
+                    Element::label(lang::ABOUT_THIRD_PARTY())
                         .font_size(12.0)
                         .fg_role(Role::TextMuted),
                 ),

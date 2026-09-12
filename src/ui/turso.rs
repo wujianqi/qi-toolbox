@@ -100,6 +100,8 @@ impl TursoUi {
     pub fn on_db_msg(&self, msg: core::db::DbMsg) {
         match msg {
             core::db::DbMsg::Connected(Ok((tables_list, fname))) => {
+                // 换库/重连后旧库的浏览缓存可能残留，先整体失效
+                core::turso::invalidate();
                 // 先取长度再整体移交，避免 set 克隆整张表列表
                 let count = tables_list.len();
                 self.tables.set(tables_list);
@@ -236,6 +238,9 @@ pub fn build_turso_tab(ui: &TursoUi) -> Element {
             TursoSource::Local(path)
         }
     };
+    // 工作线程命令发送端（Sender 非 Copy，各按钮闭包自行 clone）
+    let tx = ui.tx();
+
     // 打开文件对话框：必须用 ctx.request_pick_file 延迟到事件分发结束后弹出，
     // 框架会自动把当前窗口注入为对话框父窗口（Windows 下主窗口被禁用直到关闭），
     // 避免裸调 rfd::FileDialog 无父窗口导致无法获得焦点、与鼠标捕获冲突。
@@ -243,29 +248,52 @@ pub fn build_turso_tab(ui: &TursoUi) -> Element {
         .neutral()
         .icon_content(icons::stateful_icon(icons::FOLDER, Some(16)))
         .small()
-        .on_click(move |ctx| {
-            ctx.request_pick_file(
-                PickDialog::new()
-                    .title(lang::TURSO_FILE_TITLE())
-                    .filter(lang::TURSO_FILE_FILTER1(), &["db", "sqlite", "libsql"])
-                    .filter(lang::TURSO_FILE_FILTER2(), &["*"]),
-                move |path: Option<PathBuf>| {
-                    if let Some(path) = path {
-                        let p = path.to_string_lossy().to_string();
-                        db_path.set(p.clone());
-                        let fname = std::path::Path::new(&p)
-                            .file_name()
-                            .map(|n| n.to_string_lossy().to_string())
-                            .unwrap_or(p);
-                        status.set(format!("\u{2705} {}", fname));
-                    }
-                },
-            );
+        .on_click({
+            let tx_open = tx.clone();
+            move |ctx| {
+                // 每次打开会话独立克隆发送端，供回调独占（Sender 非 Copy）
+                let tx_c = tx_open.clone();
+                ctx.request_pick_file(
+                    PickDialog::new()
+                        .title(lang::TURSO_FILE_TITLE())
+                        .filter(lang::TURSO_FILE_FILTER1(), &["db", "sqlite", "libsql"])
+                        .filter(lang::TURSO_FILE_FILTER2(), &["*"]),
+                    move |path: Option<PathBuf>| {
+                        if let Some(path) = path {
+                            let p = path.to_string_lossy().to_string();
+                            db_path.set(p.clone());
+                            let fname = std::path::Path::new(&p)
+                                .file_name()
+                                .map(|n| n.to_string_lossy().to_string())
+                                .unwrap_or_else(|| p.clone());
+                            // 打开成功即自动连接（无需再手动点「连接」）
+                            if connected.get() {
+                                // 已在连接旧库/网络：先断开并复位页面状态，再连新文件
+                                turso::disconnect();
+                                connected.set(false);
+                                tables.set(Vec::new());
+                                selected.set(None);
+                                table_meta.set(Vec::new());
+                                table_rows.set(Vec::new());
+                                table_title.set(lang::DT_TABLE_LIST().replace("{}", "0"));
+                                show_sql.set(false);
+                                show_cols.set(false);
+                                status.set(String::new());
+                                error.set(String::new());
+                            }
+                            status.set(format!("\u{2705} {}", fname));
+                            // 记忆打开的本地库（与「连接」按钮的持久化一致）
+                            let p_s = p.clone();
+                            crate::core::settings::commit(&[
+                                ("turso.db_path", Some(p_s.as_str())),
+                                ("turso.mode", Some("0")),
+                            ]);
+                            core::db::spawn_connect(sink(tx_c), TursoSource::Local(p));
+                        }
+                    },
+                );
+            }
         });
-
-    // 连接数据库（后台线程执行，结果经 channel 回 UI 线程）。
-    // 连接源由模式决定：本地文件路径 或 网络 URL+令牌。Sender 非 Copy，闭包各自克隆。
-    let tx = ui.tx();
     let connect_btn = || {
         Element::button(lang::TURSO_CONNECT())
             .neutral()
@@ -275,6 +303,17 @@ pub fn build_turso_tab(ui: &TursoUi) -> Element {
             .on_click({
                 let tx_connect = tx.clone();
                 move |_| {
+                    // 记忆连接源（尽力而为：路径/URL 明文、token 加密后落盘）
+                    let db_path_s = db_path.get();
+                    let mode_s = turso_mode.get().to_string();
+                    let url_s = turso_url.get();
+                    let token_s = turso_token.get();
+                    crate::core::settings::commit(&[
+                        ("turso.db_path", Some(db_path_s.as_str())),
+                        ("turso.mode", Some(&mode_s)),
+                        ("turso.url", Some(url_s.trim())),
+                        ("turso.token", Some(token_s.as_str())),
+                    ]);
                     core::db::spawn_connect(sink(tx_connect.clone()), make_source());
                 }
             })
@@ -311,6 +350,8 @@ pub fn build_turso_tab(ui: &TursoUi) -> Element {
         .enabled_signal(connected)
         .on_click(move |_| {
             if let Some(table) = selected.get() {
+                // 刷新：先清浏览缓存，确保本次重拉拿到最新数据（而非命中旧页）
+                core::turso::invalidate();
                 // 刷新当前页（保留分页位置）
                 let offset = table_meta
                     .get()
@@ -350,7 +391,8 @@ pub fn build_turso_tab(ui: &TursoUi) -> Element {
         .child(Element::segmented(
             vec![lang::TURSO_MODE_LOCAL(), lang::TURSO_MODE_REMOTE()],
             turso_mode,
-        ))
+        )
+        .font_size(12.0))
         .child(open.visible_when(move || turso_mode.get() == 0))
         .child(
             Element::button(lang::TURSO_URL_BTN())
@@ -498,6 +540,11 @@ pub fn build_turso_tab(ui: &TursoUi) -> Element {
     // 构建闭包是 move，预克隆 sender（原 tx 留给下方 SQL 面板）
     let page_bar_tx = tx.clone();
     let page_bar = Element::host_signal(table_meta, move |t: core::db::TablePage| {
+        // 未选中表、或正查看某行详情（非列表视图）时都不显示分页——
+        // 详情视图没有"页"的概念，分页条只服务列表浏览。
+        if t.selected_row.is_some() {
+            return Element::leaf();
+        }
         let Some(name) = t.table_name.clone() else {
             return Element::leaf();
         };
@@ -571,11 +618,34 @@ pub fn build_turso_tab(ui: &TursoUi) -> Element {
                 .spacing(8)
                 .child(
                     Element::col()
-                        .width(200)
+                        .width(210)
+                        .spacing(4)
                         .child(
-                            Element::label_signal(table_title)
-                                .font_size(13.0)
-                                .font_weight(700),
+                            // 表列表面板标题：图标 + 表数，与内容区顶部对齐更有分区感
+                            Element::row()
+                                .width_match()
+                                .height(26)
+                                .cross(Align::Center)
+                                .spacing(6)
+                                .padding_xy(4, 0)
+                                .child(
+                                    Element::image_content(
+                                        ImageContent::from_svg_bytes(
+                                            icons::TABLE_ICON,
+                                            Some(14),
+                                        )
+                                        .tint(Role::TextMuted.resolve(&windui::theme::current())),
+                                    )
+                                    .align(Align::Center),
+                                )
+                                .child(
+                                    Element::label_signal(table_title)
+                                        .font_size(12.0)
+                                        .font_weight(600)
+                                        .fg_role(Role::TextMuted)
+                                        .max_lines(1)
+                                        .weight(1.0),
+                                ),
                         )
                         .child(table_list.weight(1.0)),
                 )

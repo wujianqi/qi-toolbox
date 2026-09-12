@@ -3,6 +3,9 @@
 //! 连接/查询一律在独立线程中执行（见 [`run_query`]），UI 线程只收结果。
 //! 同一连接源复用 [`DB_CACHE`] 缓存，避免重复打开大库造成的卡顿。
 
+use std::collections::HashMap;
+use std::time::{Duration, Instant};
+
 use turso::Builder;
 use crate::lang;
 
@@ -108,11 +111,54 @@ enum CachedDb {
 static DB_CACHE: std::sync::Mutex<Option<(String, CachedDb)>> =
     std::sync::Mutex::new(None);
 
-/// 断开连接：释放缓存的数据库句柄（下一次查询/连接会重新 build）。
+/// 浏览缓存有效期：期间内重复浏览/翻回同一页直接命中（本地查询极快，
+/// 15s 的陈旧窗口体感不可感知；远端副本与外部改动以「刷新」为准）
+const CACHE_TTL: Duration = Duration::from_secs(15);
+/// 页缓存容量上限：超出即整体清空（简化 LRU，浏览场景足够）
+const PAGE_CACHE_MAX: usize = 128;
+/// 行数缓存容量上限（同上）
+const COUNT_CACHE_MAX: usize = 128;
+
+type PageCacheKey = (String, String, usize);
+type CountCacheKey = (String, String);
+type PageCacheMap = HashMap<PageCacheKey, (Instant, Vec<String>, Vec<Vec<String>>, usize)>;
+type CountCacheMap = HashMap<CountCacheKey, (Instant, usize)>;
+
+/// 页快照缓存：(源键, 表名, 偏移) → (时刻, 列, 行, 总行数)。
+/// 命中直接回填 viewer，零查询；翻回已看过的页 / 来回翻页秒开。
+/// HashMap::new 非 const，故用 OnceLock 惰性初始化（首用时才建表）。
+static PAGE_CACHE: std::sync::OnceLock<std::sync::Mutex<PageCacheMap>> =
+    std::sync::OnceLock::new();
+
+/// 表总行数缓存：(源键, 表名) → (时刻, 总行数)。
+/// 命中时翻页/加载跳过昂贵的 COUNT(*)，大表收益明显。
+static COUNT_CACHE: std::sync::OnceLock<std::sync::Mutex<CountCacheMap>> =
+    std::sync::OnceLock::new();
+
+fn page_cache() -> &'static std::sync::Mutex<PageCacheMap> {
+    PAGE_CACHE.get_or_init(|| std::sync::Mutex::new(HashMap::new()))
+}
+
+fn count_cache() -> &'static std::sync::Mutex<CountCacheMap> {
+    COUNT_CACHE.get_or_init(|| std::sync::Mutex::new(HashMap::new()))
+}
+
+/// 清空浏览缓存（断开/重连/刷新/写语句成功后调用；数据可能已变化）
+pub fn invalidate() {
+    if let Ok(mut c) = page_cache().lock() {
+        c.clear();
+    }
+    if let Ok(mut c) = count_cache().lock() {
+        c.clear();
+    }
+}
+
+/// 断开连接：释放缓存的数据库句柄并清空浏览缓存（下一次查询/连接重新 build）。
 pub fn disconnect() {
     if let Ok(mut cache) = DB_CACHE.lock() {
         *cache = None;
     }
+    invalidate();
 }
 
 /// 在独立线程中执行数据库查询，返回结果
@@ -248,60 +294,129 @@ impl TursoViewer {
         Ok(())
     }
 
-    /// 设置选定的表并加载指定页数据
+    /// 设置选定的表并加载指定页数据（页/行数带 TTL 缓存：命中零查询）
     pub fn set_selected_table(&mut self, table_name: String, offset: usize) -> Result<(), String> {
         let source = self.source.clone();
         let name = table_name.clone();
         // 标识符双引号转义：表名来自 sqlite_master，可能含引号/空格等特殊字符
         let quoted = format!("\"{}\"", name.replace('"', "\"\""));
-        let (_, selected, data, cols, row_count, err) = run_query(&source, move |conn| {
-            Box::pin(async move {
-                let mut rows = conn
-                    .query(&format!("PRAGMA table_info({})", quoted), Vec::<turso::Value>::new())
-                    .await
-                    .map_err(|e| lang::ERR_TABLE_INFO().replace("{}", &e.to_string()))?;
-                let mut cols = Vec::new();
-                while let Ok(Some(row)) = rows.next().await {
-                    let n = value_to_string(&row, 1);
-                    if n != "NULL" && n != "ERR" { cols.push(n); }
+        let src_key = source.cache_key();
+
+        // ── 页缓存命中：翻回已看过的页（同源同表同偏移）直接回填，零查询 ──
+        if let Ok(cache) = page_cache().lock() {
+            if let Some((at, cols, rows, row_count)) =
+                cache.get(&(src_key.clone(), name.clone(), offset))
+            {
+                if at.elapsed() < CACHE_TTL {
+                    let (cols, rows, row_count) = (cols.clone(), rows.clone(), *row_count);
+                    self.selected_table = Some(name);
+                    self.table_data = rows;
+                    self.column_names = cols.clone();
+                    self.visible_columns = vec![true; cols.len()];
+                    self.selected_row = None;
+                    self.page_offset = offset;
+                    self.row_count = row_count;
+                    self.error_message = None;
+                    return Ok(());
                 }
+            }
+        }
 
-                let row_count: usize = match conn
-                    .query(&format!("SELECT COUNT(*) FROM {}", quoted), Vec::<turso::Value>::new())
-                    .await
-                {
-                    Ok(mut r) => {
-                        if let Ok(Some(row)) = r.next().await {
-                            let s = value_to_string(&row, 0);
-                            s.parse::<usize>().unwrap_or(0)
-                        } else { 0 }
+        // ── 表总行数缓存：翻页/加载时跳过昂贵的 COUNT(*)（TTL 内）──
+        let cached_count = match count_cache().lock() {
+            Ok(c) => c
+                .get(&(src_key.clone(), name.clone()))
+                .and_then(|(at, n)| if at.elapsed() < CACHE_TTL { Some(*n) } else { None }),
+            Err(_) => None,
+        };
+
+        let (_, selected, data, cols, row_count, err) = {
+            let src_key_c = src_key.clone();
+            let name_c = name.clone();
+            run_query(&source, move |conn| {
+                Box::pin(async move {
+                    let mut rows = conn
+                        .query(
+                            &format!("PRAGMA table_info({})", quoted),
+                            Vec::<turso::Value>::new(),
+                        )
+                        .await
+                        .map_err(|e| lang::ERR_TABLE_INFO().replace("{}", &e.to_string()))?;
+                    let mut cols = Vec::new();
+                    while let Ok(Some(row)) = rows.next().await {
+                        let n = value_to_string(&row, 1);
+                        if n != "NULL" && n != "ERR" { cols.push(n); }
                     }
-                    Err(_) => 0,
-                };
 
-                // 分页加载：每页 PAGE_SIZE 行，OFFSET 定位页（虚拟滚动只构建视口内的行）
-                let mut rows = conn
-                    .query(
-                        &format!(
-                            "SELECT * FROM {} LIMIT {} OFFSET {}",
-                            quoted, PAGE_SIZE, offset
-                        ),
-                        Vec::<turso::Value>::new(),
-                    )
-                    .await
-                    .map_err(|e| lang::ERR_QUERY_DATA().replace("{}", &e.to_string()))?;
-                let mut data = Vec::new();
-                while let Ok(Some(row)) = rows.next().await {
-                    let mut rd = Vec::new();
-                    for i in 0..cols.len() {
-                        rd.push(value_to_string(&row, i));
+                    // 行数：命中缓存直接用；未命中才 COUNT 并回填缓存
+                    let row_count: usize = match cached_count {
+                        Some(n) => n,
+                        None => {
+                            let n: usize = match conn
+                                .query(
+                                    &format!("SELECT COUNT(*) FROM {}", quoted),
+                                    Vec::<turso::Value>::new(),
+                                )
+                                .await
+                            {
+                                Ok(mut r) => {
+                                    if let Ok(Some(row)) = r.next().await {
+                                        let s = value_to_string(&row, 0);
+                                        s.parse::<usize>().unwrap_or(0)
+                                    } else {
+                                        0
+                                    }
+                                }
+                                Err(_) => 0,
+                            };
+                            if let Ok(mut cc) = count_cache().lock() {
+                                cc.insert(
+                                    (src_key_c.clone(), name_c.clone()),
+                                    (Instant::now(), n),
+                                );
+                                if cc.len() > COUNT_CACHE_MAX {
+                                    cc.clear();
+                                }
+                            }
+                            n
+                        }
+                    };
+
+                    // 分页加载：每页 PAGE_SIZE 行，OFFSET 定位页（虚拟滚动只构建视口内的行）
+                    let mut rows = conn
+                        .query(
+                            &format!(
+                                "SELECT * FROM {} LIMIT {} OFFSET {}",
+                                quoted, PAGE_SIZE, offset
+                            ),
+                            Vec::<turso::Value>::new(),
+                        )
+                        .await
+                        .map_err(|e| lang::ERR_QUERY_DATA().replace("{}", &e.to_string()))?;
+                    let mut data = Vec::new();
+                    while let Ok(Some(row)) = rows.next().await {
+                        let mut rd = Vec::new();
+                        for i in 0..cols.len() {
+                            rd.push(value_to_string(&row, i));
+                        }
+                        data.push(rd);
                     }
-                    data.push(rd);
-                }
 
-                Ok((Vec::new(), Some(name.clone()), data, cols, row_count, None))
+                    Ok((Vec::new(), Some(name_c.clone()), data, cols, row_count, None))
+                })
             })
-        })?;
+        }?;
+
+        // ── 回填页缓存（含列与总行数，翻回即命中）──
+        if let Ok(mut cache) = page_cache().lock() {
+            cache.insert(
+                (src_key, name.clone(), offset),
+                (Instant::now(), cols.clone(), data.clone(), row_count),
+            );
+            if cache.len() > PAGE_CACHE_MAX {
+                cache.clear();
+            }
+        }
 
         self.selected_table = selected;
         self.table_data = data;
@@ -322,11 +437,14 @@ impl TursoViewer {
         }
 
         let source = self.source.clone();
+        let is_select = {
+            let upper = sql.to_uppercase();
+            upper.starts_with("SELECT")
+                || upper.starts_with("PRAGMA")
+                || upper.starts_with("EXPLAIN")
+        };
         let (_, _, data, cols, row_count, err) = run_query(&source, move |conn| {
             Box::pin(async move {
-                let upper = sql.to_uppercase();
-                let is_select = upper.starts_with("SELECT") || upper.starts_with("PRAGMA") || upper.starts_with("EXPLAIN");
-
                 if is_select {
                     let mut rows = conn
                         .query(&sql, Vec::<turso::Value>::new())
@@ -368,6 +486,10 @@ impl TursoViewer {
                 }
             })
         })?;
+        // 写语句（非 SELECT/PRAGMA/EXPLAIN）执行成功：数据已变，浏览缓存整体失效
+        if !is_select {
+            invalidate();
+        }
 
         self.table_data = data;
         self.column_names = cols;

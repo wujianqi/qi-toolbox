@@ -10,6 +10,7 @@
 use windui::prelude::*;
 
 use super::icons;
+use super::select_text;
 use super::sink;
 use crate::core;
 use crate::core::turso::TursoSource;
@@ -62,6 +63,11 @@ pub fn render_table_list(
             let tx = tx.clone();
             let make_source = std::rc::Rc::clone(&make_source);
             // 输入法候选窗风格：选中行 = 左侧强调条 + 浅色底；悬停由 clickable 提供淡层
+            let tint = if is_sel {
+                Role::Accent.resolve(&windui::theme::current())
+            } else {
+                Role::TextMuted.resolve(&windui::theme::current())
+            };
             let mut row = Element::row()
                 .width_match()
                 .height(30)
@@ -74,6 +80,13 @@ pub fn render_table_list(
                         .height(20)
                         .bg_role_alpha(Role::Accent, if is_sel { 0.9 } else { 0.0 })
                         .corner(1.5),
+                )
+                .child(
+                    // 表名图标：选中随强调色亮起，未选中为弱化灰
+                    Element::image_content(
+                        ImageContent::from_svg_bytes(icons::TABLE_ICON, Some(15)).tint(tint),
+                    )
+                    .align(Align::Center),
                 )
                 .child(
                     Element::label(&name)
@@ -125,9 +138,18 @@ fn build_table_view(
     rows: Signal<Vec<Vec<String>>>,
 ) -> Element {
     if t.columns.is_empty() {
+        // 空态：居中表格图标 + 弱化提示，比单行文字更有“未加载”的分区感
         return Element::col()
             .fill()
             .cross(Align::Center)
+            .spacing(10)
+            .child(
+                Element::image_content(
+                    ImageContent::from_svg_bytes(icons::TABLE_ICON, Some(34))
+                        .tint(Role::TextMuted.resolve(&windui::theme::current())),
+                )
+                .align(Align::Center),
+            )
             .child(
                 Element::label(lang::DT_NO_TABLE())
                     .font_size(13.0)
@@ -142,6 +164,14 @@ fn build_table_view(
         .height(30)
         .cross(Align::Center)
         .spacing(10)
+        .child(
+            // 数据视图标题旁的表格小图标，弱化灰不抢标题焦点
+            Element::image_content(
+                ImageContent::from_svg_bytes(icons::TABLE_ICON, Some(15))
+                    .tint(Role::TextMuted.resolve(&windui::theme::current())),
+            )
+            .align(Align::Center),
+        )
         .child(
             Element::label(table_name)
                 .font_size(13.0)
@@ -215,12 +245,10 @@ fn build_table_view(
                                 .width(180),
                         )
                         .child(
-                            // 详情值用多行输入框承载：限高约 3 行，完整内容可滚动查看 + 可选中复制
+                            // 详情值用只读可选文本承载：高度不写死，随内容行数上下浮动
+                            // （SelectText 未约束高度时按内容返回固有高度），可选中复制
                             // （构建期信号随重建自动回收）
-                            Element::text_input(signal(cell.to_string()), "")
-                                .multiline()
-                                .wrap(true)
-                                .height(70)
+                            select_text(signal(cell.to_string()))
                                 .width_match()
                                 .weight(1.0),
                         ),

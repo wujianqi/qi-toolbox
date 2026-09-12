@@ -13,9 +13,11 @@
 //! - [`db`]：数据库后台任务编排（消息协议 + 结果快照 + spawn 线程）
 
 pub mod db;
+pub mod log;
 pub mod password;
 pub mod qr;
 pub mod remote;
+pub mod settings;
 pub mod sftp;
 pub mod totp;
 pub mod turso;

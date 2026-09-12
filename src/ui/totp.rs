@@ -5,7 +5,7 @@
 
 use windui::prelude::*;
 
-use super::{card, icons};
+use super::{card, icons, select_text};
 use crate::core::totp;
 use crate::lang;
 
@@ -49,6 +49,23 @@ pub fn build_totp_tab(ui: &TotpUi) -> Element {
         qr,
     } = ui.clone();
 
+    // 记忆当前 TOTP 配置（尽力而为：账号/发行方/算法明文，密钥属敏感项加密落盘）
+    let remember_totp = |key: Signal<String>,
+                         account: Signal<String>,
+                         issuer: Signal<String>,
+                         algo_sel: Signal<usize>| {
+        let key_s = key.get();
+        let account_s = account.get();
+        let issuer_s = issuer.get();
+        let algo_s = algo_sel.get().to_string();
+        crate::core::settings::commit(&[
+            ("totp.key", Some(key_s.as_str())),
+            ("totp.account", Some(account_s.as_str())),
+            ("totp.issuer", Some(issuer_s.as_str())),
+            ("totp.algo", Some(algo_s.as_str())),
+        ]);
+    };
+
     // 生成密钥
     let gen_key = Element::button(lang::TOTP_GEN_KEY())
         .neutral()
@@ -64,6 +81,8 @@ pub fn build_totp_tab(ui: &TotpUi) -> Element {
         .neutral()
         .icon_content(icons::stateful_icon(icons::ZAP, Some(16)))
         .on_click(move |_| {
+        // 记忆当前配置（账号/发行方/算法/密钥；密钥属敏感项，加密落盘）
+        remember_totp(key, account, issuer, algo_sel);
         let k = key.get();
         if !k.trim().is_empty() {
             output.set(totp::run(k.trim(), totp::algo_from_index(algo_sel.get())));
@@ -94,6 +113,7 @@ pub fn build_totp_tab(ui: &TotpUi) -> Element {
         .neutral()
         .icon_content(icons::stateful_icon(icons::QR, Some(16)))
         .on_click(move |_| {
+        remember_totp(key, account, issuer, algo_sel);
         let k = key.get();
         if k.trim().is_empty() {
             return;
@@ -129,9 +149,8 @@ pub fn build_totp_tab(ui: &TotpUi) -> Element {
     );
 
     Element::col()
-        .padding(20)
-        .spacing(14)
-        .child(Element::label(lang::TOTP_TITLE()).font_size(18.0).font_weight(700))
+        .padding(16)
+        .spacing(12)
         .child(card(
             lang::TOTP_CARD_SETUP(),
             Element::col()
@@ -190,8 +209,8 @@ pub fn build_totp_tab(ui: &TotpUi) -> Element {
                     Element::col()
                         .weight(1.0)
                         .child(
-                            Element::text_input(output, "")
-                                .multiline()
+                            // 只读可选文本：验证码可拖选/Ctrl+C 复制（不再借输入框承载）
+                            select_text(output)
                                 .font_size(26.0)
                                 .width_match()
                                 .height(120),

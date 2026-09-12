@@ -130,3 +130,14 @@ pub const GLOBE: &[u8] = br##"<svg xmlns="http://www.w3.org/2000/svg" viewBox="0
 
 /// 盾牌（SSL 证书状态）
 pub const SHIELD: &[u8] = br##"<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="#000000" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M20 13c0 5-3.5 7.5-7.66 8.95a1 1 0 0 1-.67-.01C7.5 20.5 4 18 4 13V6a1 1 0 0 1 1-1c2 0 4.5-1.2 6.24-2.72a1.17 1.17 0 0 1 1.52 0C14.51 3.81 17 5 19 5a1 1 0 0 1 1 1z"/></svg>"##;
+
+/// 左尖括号（收起菜单手柄）
+pub const CHEVRON_LEFT: &[u8] = br##"<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="#000000" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="15 18 9 12 15 6"/></svg>"##;
+
+/// 右尖括号（展开菜单手柄）
+pub const CHEVRON_RIGHT: &[u8] = br##"<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="#000000" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="9 18 15 12 9 6"/></svg>"##;
+
+/// 菜单折叠手柄形状：**右半胶囊**（左边缘平直贴分隔线，右侧半圆），实心。
+/// 与 18 宽胶囊的右半完全一致（圆角半径 9），随主题染成 Divider 色后视觉上
+/// 就是"分隔线鼓出的一块"，整体感强。
+pub const HANDLE_TAB: &[u8] = br##"<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 9 46" fill="none"><path d="M0 0 A9 9 0 0 1 9 9 L9 37 A9 9 0 0 1 0 46 Z" fill="#000000"/></svg>"##;

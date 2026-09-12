@@ -7,9 +7,9 @@ panic = "abort"     # 减少 unwind 表
 
 [package]
 name = "qi-toolbox"
-version = "0.1.1"
+version = "0.1.2"
 edition = "2021"
-description = "Qi Toolbox - 2FA验证码生成、随机密码、Turso数据库浏览、SFTP"
+description = "Qi Toolbox - 2FA验证码生成、随机密码、Turso数据库浏览、SFTP/SSH"
 license = "MIT"
 repository = "https://github.com/wujianqi/qi-toolbox"
 
@@ -25,25 +25,23 @@ OriginalFilename = "qi-toolbox.exe"
 default = []
 
 [dependencies]
-windui = "0.14"
+windui = "0.15"
 bcrypt = "0.15"
 argon2 = "0.5"
 pbkdf2 = { version = "0.12", features = ["hmac"] }
 sha2 = "0.10"
+md5 = "0.8"
 base64ct = { version = "1", features = ["alloc"] }
 getrandom = "0.2"
 totp-rs = { version = "5", features = ["gen_secret", "otpauth"] }
 qrcode = "0.14"
 turso = { version = "0.7.2", features = ["sync"] }
 tokio = { version = "1", features = ["rt", "io-util", "net", "rt-multi-thread", "time"] }
-# SFTP：russh 提供 SSH 客户端，russh-sftp 提供 SFTP 子系统
-# crypto 后端用 ring（默认 aws-lc-rs 在 Windows 上需要 cmake+nasm，构建负担重）
 russh = { version = "0.63", default-features = false, features = ["ring", "rsa"] }
 russh-sftp = "2.4"
-# 远程检测：URL 解析 / TLS 证书检查（native-tls 在 Windows 走系统 SChannel，无需 C 工具链）
 url = "2"
 native-tls = "0.2"
 x509-parser = "0.16"
 
 [target.'cfg(windows)'.dependencies]
-windows-sys = { version = "0.52", features = ["Win32_Foundation", "Win32_Globalization", "Win32_System_Console", "Win32_System_Registry", "Win32_UI_WindowsAndMessaging"] }
+windows-sys = { version = "0.52", features = ["Win32_Foundation", "Win32_Globalization", "Win32_Security_Cryptography", "Win32_System_Console", "Win32_System_Registry", "Win32_UI_WindowsAndMessaging"] }

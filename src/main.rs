@@ -21,7 +21,7 @@ fn hide_console_window() {
         if hwnd != 0 {
             ShowWindow(hwnd, SW_HIDE);
         }
-    }
+    }	
 }
 
 #[cfg(not(windows))]
@@ -44,5 +44,22 @@ fn detect_system_language() {}
 fn main() {
     hide_console_window();
     detect_system_language(); // 跟随系统语言自动选择（中文系统→中文，非中文→英文）
+    // 文件日志：先初始化（含全局 panic hook），再记录启动信息到缓存目录 logs/
+    crate::core::log::init();
+    let lang_label = if crate::lang::current() == crate::lang::LANG_ZH {
+        "zh"
+    } else {
+        "en"
+    };
+    crate::core::log::info(
+        "app",
+        &format!(
+            "Qi Toolbox v{} starting on {}/{} (lang {})",
+            env!("CARGO_PKG_VERSION"),
+            std::env::consts::OS,
+            std::env::consts::ARCH,
+            lang_label
+        ),
+    );
     ui::run();
 }

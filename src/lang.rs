@@ -36,7 +36,7 @@ fn s(en: &'static str, zh: &'static str) -> &'static str {
 
 // ────────────────────── 软件名称 ──────────────────────
 pub fn APP_NAME() -> &'static str {
-    s("Qi Toolbox", "骑途")
+    s("Qi Toolbox", "奇兔")
 }
 
 // ────────────────────── 侧栏菜单 ──────────────────────
@@ -50,7 +50,7 @@ pub fn TAB_TURSO() -> &'static str {
     s("Turso DB", "Turso库浏览")
 }
 pub fn TAB_SFTP() -> &'static str {
-    s("SFTP", "SFTP")
+    s("SFTP / SSH", "SFTP/SSH")
 }
 pub fn TAB_REMOTE() -> &'static str {
     s("Remote Check", "远程检测")
@@ -66,11 +66,11 @@ pub fn TOGGLE_LANG() -> &'static str {
 pub fn TOGGLE_THEME() -> &'static str {
     s("Switch Theme", "切换主题")
 }
+pub fn TOGGLE_SIDEBAR() -> &'static str {
+    s("Show / Hide Sidebar", "显示/隐藏菜单")
+}
 
 // ────────────────────── SFTP 页 ──────────────────────
-pub fn SFTP_CARD_CONN() -> &'static str {
-    s("Connection", "连接配置")
-}
 pub fn SFTP_HOST() -> &'static str {
     s("Host:", "主机：")
 }
@@ -137,8 +137,20 @@ pub fn SFTP_NO_CONN() -> &'static str {
 pub fn SFTP_NO_SELECT() -> &'static str {
     s("Select a file first", "请先选择文件")
 }
-pub fn SFTP_DELETE_CONFIRM() -> &'static str {
-    s("Delete \"{}\"?", "确认删除「{}」？")
+pub fn SFTP_NO_FILE_SELECT() -> &'static str {
+    s(
+        "Folders cannot be downloaded, please select files",
+        "文件夹无法下载，请选择文件",
+    )
+}
+pub fn SFTP_DELETE_CONFIRM_MULTI() -> &'static str {
+    s(
+        "Delete the following {} item(s)? This cannot be undone!",
+        "确认删除以下 {} 项？删除后不可恢复！",
+    )
+}
+pub fn SFTP_DELETE_DIR() -> &'static str {
+    s("Folder", "文件夹")
 }
 pub fn SFTP_ERR_CONNECT() -> &'static str {
     s("Connect failed: {}", "连接失败: {}")
@@ -188,6 +200,39 @@ pub fn SFTP_CMD_EXEC() -> &'static str {
 pub fn SFTP_ERR_EXEC() -> &'static str {
     s("Command failed: {}", "命令执行失败: {}")
 }
+pub fn SSH_CMD_STOP() -> &'static str {
+    s("Stop", "停止")
+}
+pub fn SSH_CMD_RUNNING() -> &'static str {
+    s("Running…", "运行中…")
+}
+pub fn SSH_CMD_STOP_TIP() -> &'static str {
+    s(
+        "Force stop the running command (use when the server hangs)",
+        "强制中断当前命令（服务器卡死时使用）",
+    )
+}
+pub fn SSH_CMD_ABORTED() -> &'static str {
+    s(
+        "Command interrupted by user. Note: if the SSH connection itself hung, the remote process may still run — reconnect and check if needed.",
+        "命令已被手动中断。注意：若 SSH 连接本身已卡死，远端进程可能仍在运行，必要时请断开重连确认。",
+    )
+}
+pub fn SSH_CMD_ADD() -> &'static str {
+    s("Add Custom Command", "添加自定义命令")
+}
+pub fn SSH_CMD_ADD_BTN() -> &'static str {
+    s("＋ Add Command", "＋ 添加命令")
+}
+pub fn SSH_CMD_ADD_HINT() -> &'static str {
+    s(
+        "Saved on this device and restored next launch.",
+        "命令将保存到本机，下次打开仍可用。",
+    )
+}
+pub fn SSH_CMD_REMOVE_TIP() -> &'static str {
+    s("Remove this command", "删除该命令")
+}
 pub fn SSH_TPL_TITLE() -> &'static str {
     s("Command templates (click to fill)", "常用命令模板（点击填入）")
 }
@@ -197,8 +242,14 @@ pub fn SSH_TPL_SYS() -> &'static str {
 pub fn SSH_TPL_SVC() -> &'static str {
     s("Services", "服务管理")
 }
+pub fn SSH_TPL_SEC() -> &'static str {
+    s("Security Hardening", "安全增强")
+}
 pub fn SSH_TPL_APP() -> &'static str {
     s("Deploy / Containers", "部署 / 容器")
+}
+pub fn SSH_TPL_DEPLOY() -> &'static str {
+    s("App Environment Deploy", "应用环境部署")
 }
 pub fn SSH_TPL_NET() -> &'static str {
     s("Network", "网络")
@@ -212,11 +263,11 @@ pub fn SSH_TPL_DB() -> &'static str {
 pub fn SSH_TPL_RUNTIME() -> &'static str {
     s("Runtimes / Languages", "运行时/语言")
 }
+pub fn SSH_TPL_MY() -> &'static str {
+    s("My Commands", "我的命令")
+}
 
 // ────────────────────── 远程检测页 ──────────────────────
-pub fn REMOTE_TITLE() -> &'static str {
-    s("Remote Check", "远程检测")
-}
 pub fn REMOTE_CONNECT() -> &'static str {
     s("Connect", "连接")
 }
@@ -302,7 +353,19 @@ pub fn REMOTE_QR() -> &'static str {
     s("QR Code", "二维码")
 }
 pub fn REMOTE_QR_TITLE() -> &'static str {
-    s("Endpoint QR Code", "端点二维码")
+    s("URL QR Code", "网址二维码")
+}
+pub fn REMOTE_QR_GEN() -> &'static str {
+    s("Generate", "生成")
+}
+pub fn REMOTE_QR_EMPTY() -> &'static str {
+    s("Please enter a URL first", "请先输入网址")
+}
+pub fn REMOTE_QR_SUPPORT() -> &'static str {
+    s(
+        "Connected URL is pre-filled; edit it and click Generate.",
+        "已连接时默认带入连接网址，可修改后生成。",
+    )
 }
 pub fn REMOTE_NOT_TLS() -> &'static str {
     s(
@@ -357,13 +420,10 @@ pub fn REMOTE_PANIC() -> &'static str {
 }
 
 // ────────────────────── 关于 ──────────────────────
-pub fn ABOUT_TITLE() -> &'static str {
-    s("About", "关于")
-}
 pub fn ABOUT_DESC() -> &'static str {
     s(
-        "Open-source toolbox with the following features:",
-        "开源桌面工具集，提供以下功能：",
+        "Open-source all-in-one website management toolkit with the following features:",
+        "开源一站式网站管理工具箱，提供以下功能：",
     )
 }
 pub fn ABOUT_2FA() -> &'static str {
@@ -399,11 +459,29 @@ pub fn ABOUT_SFTP() -> &'static str {
 pub fn ABOUT_BUILT() -> &'static str {
     s("Built with Rust + windui", "基于 Rust + windui 构建")
 }
+pub fn ABOUT_LICENSE_TITLE() -> &'static str {
+    s("Open Source & License", "开源与许可")
+}
+pub fn ABOUT_LICENSE() -> &'static str {
+    s(
+        "Licensed under the MIT License (© 2026 wujianqi); full terms in the repository's LICENSE file.",
+        "本项目基于 MIT License 开源（© 2026 wujianqi）；完整条款见仓库 LICENSE 文件。",
+    )
+}
+pub fn ABOUT_ICONS() -> &'static str {
+    s(
+        "Some UI icons are styled after Lucide (MIT License, lucide.dev).",
+        "部分 UI 图标参考 Lucide 风格绘制（MIT 许可，lucide.dev）。",
+    )
+}
+pub fn ABOUT_THIRD_PARTY() -> &'static str {
+    s(
+        "Third-party library licenses: see Cargo.toml / Cargo.lock and each project's repository.",
+        "第三方依赖许可：见 Cargo.toml / Cargo.lock 与各依赖项目的仓库说明。",
+    )
+}
 
 // ────────────────────── 密码页 ──────────────────────
-pub fn PWD_TITLE() -> &'static str {
-    s("Password Generator", "账号密码生成")
-}
 pub fn PWD_CARD_SETUP() -> &'static str {
     s("Generate Settings", "生成配置")
 }
@@ -474,9 +552,6 @@ pub fn PLAT_GO() -> &'static str {
 }
 
 // ────────────────────── TOTP 页 ──────────────────────
-pub fn TOTP_TITLE() -> &'static str {
-    s("2FA TOTP Authenticator", "2FA TOTP验证码生成器")
-}
 pub fn TOTP_CARD_SETUP() -> &'static str {
     s("Key Setup", "密钥配置")
 }
@@ -692,4 +767,12 @@ pub fn ERR_ARGON2_HASH() -> &'static str {
 }
 pub fn ERR_BCRYPT_HASH() -> &'static str {
     s("Bcrypt hashing failed: {}", "Bcrypt 加密失败: {}")
+}
+
+// ────────────────────── 通用（可选文本右键菜单）──────────────────────
+pub fn MENU_COPY() -> &'static str {
+    s("Copy", "复制")
+}
+pub fn MENU_SELECT_ALL() -> &'static str {
+    s("Select All", "全选")
 }
