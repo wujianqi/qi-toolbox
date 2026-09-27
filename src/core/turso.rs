@@ -6,8 +6,8 @@
 use std::collections::HashMap;
 use std::time::{Duration, Instant};
 
-use turso::Builder;
 use crate::lang;
+use turso::Builder;
 
 /// 单次查询最大返回行数（防无 LIMIT 查询打爆内存）
 pub const MAX_TABLE_ROWS: usize = 100_000;
@@ -18,7 +18,7 @@ pub const PAGE_SIZE: usize = 50;
 /// 单元格值 → 文本（NULL/二进制安全降级）。
 /// TEXT 值**完整保留**：行详情视图需要全文；超长文本的展示限长在渲染层做
 /// （见 ui/table.rs 的 `cell_display`），业务层不再截断。
-fn value_to_string(row: &turso::Row, idx: usize) -> String {
+pub(crate) fn value_to_string(row: &turso::Row, idx: usize) -> String {
     match row.get_value(idx) {
         Ok(turso::Value::Null) => "NULL".to_string(),
         Ok(turso::Value::Integer(i)) => i.to_string(),
@@ -108,8 +108,7 @@ enum CachedDb {
     Remote(turso::sync::Database),
 }
 
-static DB_CACHE: std::sync::Mutex<Option<(String, CachedDb)>> =
-    std::sync::Mutex::new(None);
+static DB_CACHE: std::sync::Mutex<Option<(String, CachedDb)>> = std::sync::Mutex::new(None);
 
 /// 浏览缓存有效期：期间内重复浏览/翻回同一页直接命中（本地查询极快，
 /// 15s 的陈旧窗口体感不可感知；远端副本与外部改动以「刷新」为准）
@@ -127,8 +126,7 @@ type CountCacheMap = HashMap<CountCacheKey, (Instant, usize)>;
 /// 页快照缓存：(源键, 表名, 偏移) → (时刻, 列, 行, 总行数)。
 /// 命中直接回填 viewer，零查询；翻回已看过的页 / 来回翻页秒开。
 /// HashMap::new 非 const，故用 OnceLock 惰性初始化（首用时才建表）。
-static PAGE_CACHE: std::sync::OnceLock<std::sync::Mutex<PageCacheMap>> =
-    std::sync::OnceLock::new();
+static PAGE_CACHE: std::sync::OnceLock<std::sync::Mutex<PageCacheMap>> = std::sync::OnceLock::new();
 
 /// 表总行数缓存：(源键, 表名) → (时刻, 总行数)。
 /// 命中时翻页/加载跳过昂贵的 COUNT(*)，大表收益明显。
@@ -164,8 +162,11 @@ pub fn disconnect() {
 /// 在独立线程中执行数据库查询，返回结果
 fn run_query<F>(source: &TursoSource, f: F) -> Result<QueryResult, String>
 where
-    F: FnOnce(turso::Connection) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<QueryResult, String>> + Send>>
-        + Send
+    F: FnOnce(
+            turso::Connection,
+        ) -> std::pin::Pin<
+            Box<dyn std::future::Future<Output = Result<QueryResult, String>> + Send>,
+        > + Send
         + 'static,
 {
     // 后台线程内要按 source 构建连接：借用参数不能逃出函数，先克隆为自有值
@@ -190,17 +191,17 @@ where
         let rt = tokio::runtime::Builder::new_current_thread()
             .enable_all()
             .build()
-            .map_err(|e| lang::ERR_RUNTIME().replace("{}", &e.to_string()))?;
+            .map_err(|e| lang::ERR_RUNTIME(e.to_string()))?;
 
         rt.block_on(async {
             let conn = match cached {
                 Some(CachedDb::Local(db)) => db
                     .connect()
-                    .map_err(|e| lang::ERR_GET_CONN().replace("{}", &e.to_string()))?,
+                    .map_err(|e| lang::ERR_GET_CONN(e.to_string()))?,
                 Some(CachedDb::Remote(db)) => db
                     .connect()
                     .await
-                    .map_err(|e| lang::ERR_GET_CONN().replace("{}", &e.to_string()))?,
+                    .map_err(|e| lang::ERR_GET_CONN(e.to_string()))?,
                 None => match source {
                     // 本地文件：直接打开
                     TursoSource::Local(_) => {
@@ -208,12 +209,12 @@ where
                             .experimental_index_method(true)
                             .build()
                             .await
-                            .map_err(|e| lang::ERR_CONNECT_DB().replace("{}", &e.to_string()))?;
+                            .map_err(|e| lang::ERR_CONNECT_DB(e.to_string()))?;
                         if let Ok(mut cache) = DB_CACHE.lock() {
                             *cache = Some((key.clone(), CachedDb::Local(db.clone())));
                         }
                         db.connect()
-                            .map_err(|e| lang::ERR_GET_CONN().replace("{}", &e.to_string()))?
+                            .map_err(|e| lang::ERR_GET_CONN(e.to_string()))?
                     }
                     // 网络：内存副本 + 远程同步（首次连接自动拉取 schema 与数据）
                     TursoSource::Remote { url, token } => {
@@ -226,13 +227,13 @@ where
                         let db = b
                             .build()
                             .await
-                            .map_err(|e| lang::ERR_CONNECT_DB().replace("{}", &e.to_string()))?;
+                            .map_err(|e| lang::ERR_CONNECT_DB(e.to_string()))?;
                         if let Ok(mut cache) = DB_CACHE.lock() {
                             *cache = Some((key.clone(), CachedDb::Remote(db.clone())));
                         }
                         db.connect()
                             .await
-                            .map_err(|e| lang::ERR_GET_CONN().replace("{}", &e.to_string()))?
+                            .map_err(|e| lang::ERR_GET_CONN(e.to_string()))?
                     }
                 },
             };
@@ -245,9 +246,9 @@ where
         Ok(r) => r,
         Err(e) => {
             let msg = if let Some(s) = e.downcast_ref::<&str>() {
-                lang::ERR_THREAD_PANIC().replace("{}", s)
+                lang::ERR_THREAD_PANIC(*s)
             } else if let Some(s) = e.downcast_ref::<String>() {
-                lang::ERR_THREAD_PANIC().replace("{}", s)
+                lang::ERR_THREAD_PANIC(s)
             } else {
                 lang::ERR_THREAD_PANIC_UNKNOWN().to_string()
             };
@@ -269,7 +270,7 @@ impl TursoViewer {
                         Vec::<turso::Value>::new(),
                     )
                     .await
-                    .map_err(|e| lang::ERR_QUERY_TABLES().replace("{}", &e.to_string()))?;
+                    .map_err(|e| lang::ERR_QUERY_TABLES(e.to_string()))?;
 
                 let mut tables = Vec::new();
                 while let Ok(Some(row)) = rows.next().await {
@@ -324,9 +325,13 @@ impl TursoViewer {
 
         // ── 表总行数缓存：翻页/加载时跳过昂贵的 COUNT(*)（TTL 内）──
         let cached_count = match count_cache().lock() {
-            Ok(c) => c
-                .get(&(src_key.clone(), name.clone()))
-                .and_then(|(at, n)| if at.elapsed() < CACHE_TTL { Some(*n) } else { None }),
+            Ok(c) => c.get(&(src_key.clone(), name.clone())).and_then(|(at, n)| {
+                if at.elapsed() < CACHE_TTL {
+                    Some(*n)
+                } else {
+                    None
+                }
+            }),
             Err(_) => None,
         };
 
@@ -341,11 +346,13 @@ impl TursoViewer {
                             Vec::<turso::Value>::new(),
                         )
                         .await
-                        .map_err(|e| lang::ERR_TABLE_INFO().replace("{}", &e.to_string()))?;
+                        .map_err(|e| lang::ERR_TABLE_INFO(e.to_string()))?;
                     let mut cols = Vec::new();
                     while let Ok(Some(row)) = rows.next().await {
                         let n = value_to_string(&row, 1);
-                        if n != "NULL" && n != "ERR" { cols.push(n); }
+                        if n != "NULL" && n != "ERR" {
+                            cols.push(n);
+                        }
                     }
 
                     // 行数：命中缓存直接用；未命中才 COUNT 并回填缓存
@@ -370,10 +377,7 @@ impl TursoViewer {
                                 Err(_) => 0,
                             };
                             if let Ok(mut cc) = count_cache().lock() {
-                                cc.insert(
-                                    (src_key_c.clone(), name_c.clone()),
-                                    (Instant::now(), n),
-                                );
+                                cc.insert((src_key_c.clone(), name_c.clone()), (Instant::now(), n));
                                 if cc.len() > COUNT_CACHE_MAX {
                                     cc.clear();
                                 }
@@ -392,7 +396,7 @@ impl TursoViewer {
                             Vec::<turso::Value>::new(),
                         )
                         .await
-                        .map_err(|e| lang::ERR_QUERY_DATA().replace("{}", &e.to_string()))?;
+                        .map_err(|e| lang::ERR_QUERY_DATA(e.to_string()))?;
                     let mut data = Vec::new();
                     while let Ok(Some(row)) = rows.next().await {
                         let mut rd = Vec::new();
@@ -402,7 +406,14 @@ impl TursoViewer {
                         data.push(rd);
                     }
 
-                    Ok((Vec::new(), Some(name_c.clone()), data, cols, row_count, None))
+                    Ok((
+                        Vec::new(),
+                        Some(name_c.clone()),
+                        data,
+                        cols,
+                        row_count,
+                        None,
+                    ))
                 })
             })
         }?;
@@ -449,7 +460,7 @@ impl TursoViewer {
                     let mut rows = conn
                         .query(&sql, Vec::<turso::Value>::new())
                         .await
-                        .map_err(|e| lang::ERR_QUERY_FAIL().replace("{}", &e.to_string()))?;
+                        .map_err(|e| lang::ERR_QUERY_FAIL(e.to_string()))?;
 
                     // 尝试从第一行列推断列名；限制返回行数防止无 LIMIT 查询打爆内存
                     let mut cols = Vec::new();
@@ -481,7 +492,7 @@ impl TursoViewer {
                     // 非 SELECT 语句（INSERT/UPDATE/DELETE 等）
                     conn.execute(&sql, Vec::<turso::Value>::new())
                         .await
-                        .map_err(|e| lang::ERR_EXEC_FAIL().replace("{}", &e.to_string()))?;
+                        .map_err(|e| lang::ERR_EXEC_FAIL(e.to_string()))?;
                     Ok((Vec::new(), None, Vec::new(), Vec::new(), 0, None))
                 }
             })
@@ -500,5 +511,157 @@ impl TursoViewer {
         self.page_offset = 0;
         self.error_message = err;
         Ok(())
+    }
+
+    /// 导出专用：读取列名与实时总行数（不走页/行数缓存——导出必须拿到准确值）
+    pub fn export_begin(&mut self, table_name: &str) -> Result<(Vec<String>, usize), String> {
+        let source = self.source.clone();
+        let quoted = format!("\"{}\"", table_name.replace('"', "\"\""));
+        let (_, _, _, cols, row_count, err) = run_query(&source, move |conn| {
+            Box::pin(async move {
+                let mut rows = conn
+                    .query(
+                        &format!("PRAGMA table_info({})", quoted),
+                        Vec::<turso::Value>::new(),
+                    )
+                    .await
+                    .map_err(|e| lang::ERR_TABLE_INFO(e.to_string()))?;
+                let mut cols = Vec::new();
+                while let Ok(Some(row)) = rows.next().await {
+                    let n = value_to_string(&row, 1);
+                    if n != "NULL" && n != "ERR" {
+                        cols.push(n);
+                    }
+                }
+                let count: usize = match conn
+                    .query(
+                        &format!("SELECT COUNT(*) FROM {}", quoted),
+                        Vec::<turso::Value>::new(),
+                    )
+                    .await
+                {
+                    Ok(mut r) => {
+                        if let Ok(Some(row)) = r.next().await {
+                            value_to_string(&row, 0).parse::<usize>().unwrap_or(0)
+                        } else {
+                            0
+                        }
+                    }
+                    Err(_) => 0,
+                };
+                Ok((
+                    Vec::new(),
+                    Some(String::new()),
+                    Vec::new(),
+                    cols,
+                    count,
+                    None,
+                ))
+            })
+        })?;
+        self.column_names = cols.clone();
+        self.row_count = row_count;
+        self.error_message = err;
+        Ok((cols, row_count))
+    }
+
+    /// 导出专用：大批量取行（不经页缓存，避免污染浏览缓存；offset 前提下的快照读）
+    pub fn export_batch(
+        &mut self,
+        table_name: &str,
+        offset: usize,
+        limit: usize,
+    ) -> Result<Vec<Vec<String>>, String> {
+        let source = self.source.clone();
+        let quoted = format!("\"{}\"", table_name.replace('"', "\"\""));
+        let (_, _, data, _, _, err) = run_query(&source, move |conn| {
+            Box::pin(async move {
+                let mut rows = conn
+                    .query(
+                        &format!("SELECT * FROM {} LIMIT {} OFFSET {}", quoted, limit, offset),
+                        Vec::<turso::Value>::new(),
+                    )
+                    .await
+                    .map_err(|e| lang::ERR_QUERY_DATA(e.to_string()))?;
+                let mut data = Vec::new();
+                while let Ok(Some(row)) = rows.next().await {
+                    let mut rd = Vec::new();
+                    for i in 0.. {
+                        match row.get_value(i) {
+                            Ok(_) => rd.push(value_to_string(&row, i)),
+                            Err(_) => break,
+                        }
+                    }
+                    data.push(rd);
+                }
+                Ok((Vec::new(), None, data, Vec::new(), 0, None))
+            })
+        })?;
+        self.error_message = err;
+        Ok(data)
+    }
+
+    /// 导出专用：rowid 游标批量取行（keyset 分页）。
+    ///
+    /// `SELECT rowid, * … WHERE rowid > ? ORDER BY rowid LIMIT ?` 参数化查询：
+    /// - OFFSET 方式每批都要扫描并丢弃前面所有行（O(n²)），keyset 走 rowid 索引
+    ///   每批只读本批（O(n) 总成本）；
+    /// - 游标定位不依赖行号，中途增删行不会跳行/重行；
+    /// - 返回 (本批数据[不含 rowid 列], 本批最后一条 rowid)，批空时 rowid 为 None。
+    ///
+    /// WITHOUT ROWID 表没有 rowid 列，查询会失败——调用方应回退 OFFSET 方式。
+    pub fn export_batch_keyset(
+        &mut self,
+        table_name: &str,
+        after_rowid: i64,
+        limit: usize,
+    ) -> Result<(Vec<Vec<String>>, Option<i64>), String> {
+        let source = self.source.clone();
+        let quoted = format!("\"{}\"", table_name.replace('"', "\"\""));
+        let (_, rowid_slot, data, _, _, err) = run_query(&source, move |conn| {
+            Box::pin(async move {
+                let mut rows = conn
+                    .query(
+                        &format!(
+                            "SELECT rowid, * FROM {} WHERE rowid > ? ORDER BY rowid LIMIT ?",
+                            quoted
+                        ),
+                        vec![
+                            turso::Value::Integer(after_rowid),
+                            turso::Value::Integer(limit as i64),
+                        ],
+                    )
+                    .await
+                    .map_err(|e| lang::ERR_QUERY_DATA(e.to_string()))?;
+                let mut data: Vec<Vec<String>> = Vec::new();
+                let mut last_rowid: Option<i64> = None;
+                while let Ok(Some(row)) = rows.next().await {
+                    // 第 0 列是 rowid；第 1 列起才是用户数据
+                    last_rowid = value_to_string(&row, 0).parse::<i64>().ok();
+                    let mut rd = Vec::new();
+                    for i in 1.. {
+                        match row.get_value(i) {
+                            Ok(_) => rd.push(value_to_string(&row, i)),
+                            Err(_) => break,
+                        }
+                    }
+                    data.push(rd);
+                }
+                // QueryResult 槽位固定：把 last_rowid 编码进第 2 槽（Option<String>）传回
+                Ok((
+                    Vec::new(),
+                    last_rowid.map(|r| r.to_string()),
+                    data,
+                    Vec::new(),
+                    0,
+                    None,
+                ))
+            })
+        })?;
+        self.error_message = err;
+        // 第 2 槽还原游标：None = 本批无行（已到表尾）
+        let last_rowid = rowid_slot.as_deref().and_then(|s| s.parse::<i64>().ok());
+        let reached_end = data.is_empty();
+        Ok((data, if reached_end { None } else { last_rowid }))
     }
 }

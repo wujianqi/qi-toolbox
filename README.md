@@ -1,4 +1,6 @@
-# Qi Toolbox
+# 奇兔宝 (Qi Toolbox)
+
+> **小身材，大管家 —— 你的随身运维百宝箱。**
 
 ---
 
@@ -10,7 +12,18 @@
 
 ## 中文
 
-轻量级桌面工具集，基于 Rust + windui 构建，提供 2FA 验证码生成、账号密码加密、Turso 数据库浏览、SFTP 文件管理、远程检测五大功能。
+轻量级一站式服务器快捷管理工具箱，基于 Rust + windui 构建的原生 Windows 桌面应用，集 2FA 验证码生成、账号密码加密、数据库浏览（Turso / MySQL / PostgreSQL）、SFTP 文件管理、S3 对象存储浏览、远程检测（连接 / Ping / SSL 证书 / 响应体 / SEO 分析 / 安全检测）于一体。
+
+> **特点**：单文件绿色版、零安装、无后台进程；敏感数据（TOTP 密钥、SFTP 密码等）本地加密存储（Windows 走 DPAPI）；内置中英双语，跟随系统语言启动，可在应用内一键切换。
+
+### ✨ 亮点
+
+- **一个 exe 走天下**：单文件绿色版，下载即用，U 盘可携带，不写注册表、无后台进程
+- **数据只属于你**：TOTP 密钥、SFTP 密码等敏感信息全部本地加密存储（Windows DPAPI）
+- **从密码到上线的完整链路**：生成密码 → 哈希加密 → 生成 SQL → SFTP 部署 → 远程检测，一个工具贯穿全流程
+- **原生性能**：Rust 构建，原生 Windows GUI，启动即开即用，无 Electron 式臃肿
+- **安全体检一体化**：SSL 证书 / 安全响应头 / 敏感路径 / 风险端口 / TLS 旧版本，一键扫描
+- **中英双语随行**：跟随系统语言启动，应用内一键切换
 
 ### 功能
 
@@ -28,13 +41,20 @@
 - 一键生成 8/12/16 位随机密码（包含大小写字母、数字、特殊字符）
 - 自动生成 SQL UPDATE 语句，方便直接应用到数据库
 
-#### Turso 数据库浏览
+#### 数据库浏览（Turso / MySQL / PostgreSQL）
 
-- 连接本地 Turso / libSQL / SQLite 数据库文件
+- 连接本地 Turso / libSQL / SQLite 数据库文件，或远程 MySQL / PostgreSQL 数据库
+- 多库址管理：保存常用连接，快速切换
 - 浏览所有表及表结构
 - 数据表格展示，支持列过滤和分页
 - 内置 SQL 查询编辑器，支持语法高亮
-- 行详情查看模式
+- 数据导出 CSV，行详情查看模式
+
+#### S3 对象存储浏览
+
+- 连接 S3 兼容对象存储（AWS S3、MinIO、Cloudflare R2 等）
+- Bucket 与对象列表浏览，路径式 / 虚拟主机式寻址可选
+- 对象上传 / 下载 / 删除
 
 #### SFTP 文件管理
 
@@ -49,8 +69,23 @@
 - 连接：TCP 建连（加密协议自动 TLS 握手），返回 RTT 与解析到的 IP
 - Ping：连测 3 次，输出最小 / 平均 / 最大时延
 - SSL 证书状态：证书链校验 + 主题 / 签发者 / 有效期 / 剩余天数（仅 https/wss）
-- 网页状态：HTTP 状态码 / 响应大小 / 耗时，自动跟随重定向（仅 http/https）
+- 响应体：HTTP 状态码 / 响应大小 / 耗时 + 响应体预览，自动跟随重定向（仅 http/https）
+- SEO 分析：title / description / keywords / canonical / viewport / H1 / 图片 alt 一目了然（仅 http/https）
+- 安全检测：敏感路径暴露 / 安全响应头缺失 / 风险端口开放 / TLS 旧版本兼容，一键扫描分级报告（仅 http/https）
 - 端点二维码：一键生成当前地址二维码，扫码即可分发
+
+### 界面截图
+
+> 截图存放于 `docs/screenshots/`，随版本发布更新。
+
+| 模块 | 截图 |
+|---|---|
+| 2FA TOTP 验证码 | ![TOTP](docs/screenshots/totp.png) |
+| 数据库浏览 | ![数据库](docs/screenshots/database.png) |
+| SFTP 文件管理 | ![SFTP](docs/screenshots/sftp.png) |
+| 远程检测 | ![远程检测](docs/screenshots/remote.png) |
+| 密码加密 | ![密码](docs/screenshots/password.png) |
+| S3 对象存储 | ![S3](docs/screenshots/s3.png) |
 
 ### 预编译下载
 
@@ -64,6 +99,8 @@
 
 - [Rust](https://www.rust-lang.org/tools/install) (2021 edition)
 
+> 注：项目目前主要面向 Windows（windui 为 Windows 原生 GUI 框架），其他平台未经充分测试。
+
 #### 编译
 
 ```bash
@@ -74,63 +111,7 @@ cargo build
 cargo build --release
 ```
 
-#### 一键构建发布版
-
-```powershell
-# Windows (PowerShell)
-.\build_release.ps1
-
-# Linux / macOS
-bash build_release.sh
-```
-
-产物输出到 `release/` 目录：
-
-```
-release/
-├── qi-toolbox.exe    # 单包双语言（跟随系统，可在应用内切换）
-└── README.md
-```
-
-### 项目结构
-
-分层设计：`core/` 业务层（纯逻辑，不依赖 UI 框架）+ `ui/` 界面层（windui），板块按页独立，便于扩展。
-
-```
-src/
-├── main.rs           # 入口：平台初始化 + 启动 UI
-├── lang.rs           # 国际化文案（中文 / 英文，运行时切换）
-├── core/             # 业务层（不依赖 windui）
-│   ├── totp.rs       # TOTP 密钥生成、验证码计算、二维码数据
-│   ├── password.rs   # 密码哈希（Argon2id / Bcrypt / PBKDF2）
-│   ├── sftp.rs       # SFTP 工作线程（SSH/SFTP 命令协议）
-│   ├── turso.rs      # Turso/libSQL 数据库连接与查询
-│   ├── db.rs         # 数据库后台任务编排（消息协议 + 线程）
-│   └── remote.rs     # 远程检测（URL 解析 / Ping / SSL / 网页状态）
-└── ui/               # 界面层（windui，仅渲染与交互）
-    ├── mod.rs        # 入口 + AppState（页面状态聚合）
-    ├── widgets.rs    # 共享组件（卡片 / 导航 / 主题切换 / 关于）
-    ├── table.rs      # 数据表格渲染（表列表 / 分页 / 详情视图）
-    ├── sql.rs        # SQL 查询面板
-    ├── totp.rs       # TOTP 页
-    ├── password.rs   # 密码页
-    ├── turso.rs      # Turso 页
-    ├── sftp.rs       # SFTP 页
-    └── remote.rs     # 远程检测页
-```
-
-### 技术栈
-
-- [Rust](https://www.rust-lang.org/) — 系统语言
-- [windui](https://crates.io/crates/windui) — Windows 原生 GUI 框架
-- [totp-rs](https://github.com/constverif/totp-rs) — TOTP 算法实现
-- [argon2](https://github.com/RustCrypto/password-hashes) — Argon2id 哈希
-- [bcrypt](https://github.com/Keats/rust-bcrypt) — Bcrypt 加密
-- [pbkdf2](https://github.com/RustCrypto/password-hashes) — PBKDF2 哈希
-- [turso](https://github.com/tursodatabase/turso-client-rust) — Turso/libSQL 客户端
-- [qrcode](https://github.com/mynanism/qrcode-rust) — 二维码生成
-- [russh](https://github.com/warp-tech/russh) — SSH / SFTP 客户端
-- [native-tls](https://github.com/sfackler/rust-native-tls) — TLS 证书校验
+产物位于 `target/release/qi-toolbox.exe`。
 
 ### 许可证
 
@@ -142,7 +123,18 @@ src/
 
 ## English
 
-Lightweight desktop toolbox built with Rust + windui, providing 2FA authenticator, password hashing, Turso database browsing, SFTP file manager, and remote check.
+Lightweight one-stop server management toolbox — a native Windows desktop app built with Rust + windui, combining a 2FA authenticator, password hashing, database viewers (Turso / MySQL / PostgreSQL), an SFTP file manager, an S3 object storage browser, and remote checks (connect / ping / SSL certificate / response body / SEO analysis / security scan).
+
+> **Highlights**: single-file portable build, zero install, no background services; sensitive data (TOTP secrets, SFTP passwords, etc.) is stored locally with platform encryption (DPAPI on Windows); built-in zh/en bilingual UI follows the system language and can be switched in-app.
+
+### ✨ Highlights
+
+- **One exe for everything**: single-file portable build, download and run, USB-stick friendly, no registry writes, no background processes
+- **Your data stays yours**: TOTP secrets, SFTP passwords and other sensitive data are stored locally with encryption (DPAPI on Windows)
+- **Full workflow from password to production**: generate password → hash → SQL → SFTP deploy → remote check, all in one tool
+- **Native performance**: built with Rust and a native Windows GUI — instant startup, no Electron bloat
+- **One-click security scan**: SSL certificate / security headers / sensitive paths / risky ports / legacy TLS, with a graded report
+- **Bilingual out of the box**: follows system language, one-click switch in-app
 
 ### Features
 
@@ -160,13 +152,20 @@ Lightweight desktop toolbox built with Rust + windui, providing 2FA authenticato
 - Generate random passwords (8/12/16 chars) with uppercase, lowercase, digits, and symbols
 - Auto-generate SQL UPDATE statements for direct database use
 
-#### Turso Database Viewer
+#### Database Viewer (Turso / MySQL / PostgreSQL)
 
-- Connect to local Turso / libSQL / SQLite database files
+- Connect to local Turso / libSQL / SQLite files, or remote MySQL / PostgreSQL databases
+- Multi-connection management: save frequently used connections for quick switching
 - Browse all tables and schema
 - Data grid with column filtering and pagination
 - Built-in SQL query editor with syntax highlighting
-- Row detail view
+- CSV export and row detail view
+
+#### S3 Object Storage Browser
+
+- Connect to S3-compatible object storage (AWS S3, MinIO, Cloudflare R2, etc.)
+- Bucket / object listing with path-style or virtual-host addressing
+- Object upload / download / delete
 
 #### SFTP File Manager
 
@@ -181,8 +180,23 @@ Lightweight desktop toolbox built with Rust + windui, providing 2FA authenticato
 - Connect: TCP handshake (auto TLS for encrypted schemes), reports RTT and resolved IP
 - Ping: 3 probes with min / avg / max latency
 - SSL certificate: chain validation + subject / issuer / validity / days left (https/wss only)
-- Web status: HTTP status code / size / elapsed, follows redirects (http/https only)
+- Web body: HTTP status code / size / elapsed + response body preview, follows redirects (http/https only)
+- SEO analysis: title / description / keywords / canonical / viewport / H1 / image alt at a glance (http/https only)
+- Security scan: sensitive path exposure / missing security headers / risky open ports / legacy TLS support, one-click graded report (http/https only)
 - Endpoint QR code: one-click QR for the current URL, scan to share
+
+### Screenshots
+
+> Screenshots live in `docs/screenshots/` and are updated with each release.
+
+| Module | Screenshot |
+|---|---|
+| 2FA TOTP Authenticator | ![TOTP](docs/screenshots/totp.png) |
+| Database Viewer | ![Database](docs/screenshots/database.png) |
+| SFTP File Manager | ![SFTP](docs/screenshots/sftp.png) |
+| Remote Check | ![Remote](docs/screenshots/remote.png) |
+| Password Hashing | ![Password](docs/screenshots/password.png) |
+| S3 Object Storage | ![S3](docs/screenshots/s3.png) |
 
 ### Download
 
@@ -196,6 +210,8 @@ Visit the [Releases](https://github.com/wujianqi/qi-toolbox/releases) page.
 
 - [Rust](https://www.rust-lang.org/tools/install) (2021 edition)
 
+> 注：项目目前主要面向 Windows（windui 为 Windows 原生 GUI 框架），其他平台未经充分测试。
+
 #### Build
 
 ```bash
@@ -206,63 +222,7 @@ cargo build
 cargo build --release
 ```
 
-#### Build for Release
-
-```powershell
-# Windows (PowerShell)
-.\build_release.ps1
-
-# Linux / macOS
-bash build_release.sh
-```
-
-Output in `release/`:
-
-```
-release/
-├── qi-toolbox.exe    # Single package, zh/en built-in (follows system, switchable in-app)
-└── README.md
-```
-
-### Project Structure
-
-Layered design: `core/` business layer (pure logic, no UI framework) + `ui/` presentation layer (windui). Each feature lives in its own page module for easy extension.
-
-```
-src/
-├── main.rs           # Entry point: platform init + launch UI
-├── lang.rs           # i18n strings (zh / en, runtime switch)
-├── core/             # Business layer (windui-free)
-│   ├── totp.rs       # TOTP key generation, code calculation, QR data
-│   ├── password.rs   # Password hashing (Argon2id / Bcrypt / PBKDF2)
-│   ├── sftp.rs       # SFTP worker thread (SSH/SFTP command protocol)
-│   ├── turso.rs      # Turso/libSQL database connection and queries
-│   ├── db.rs         # Database background tasks (message protocol + threads)
-│   └── remote.rs     # Remote check (URL parse / Ping / SSL / web status)
-└── ui/               # Presentation layer (windui, rendering & interaction only)
-    ├── mod.rs        # Entry + AppState (page state aggregation)
-    ├── widgets.rs    # Shared components (card / nav / theme toggle / about)
-    ├── table.rs      # Data table rendering (list / pagination / detail)
-    ├── sql.rs        # SQL query panel
-    ├── totp.rs       # TOTP page
-    ├── password.rs   # Password page
-    ├── turso.rs      # Turso page
-    ├── sftp.rs       # SFTP page
-    └── remote.rs     # Remote check page
-```
-
-### Tech Stack
-
-- [Rust](https://www.rust-lang.org/) — Systems language
-- [windui](https://crates.io/crates/windui) — Native Windows GUI framework
-- [totp-rs](https://github.com/constverif/totp-rs) — TOTP algorithm
-- [argon2](https://github.com/RustCrypto/password-hashes) — Argon2id hashing
-- [bcrypt](https://github.com/Keats/rust-bcrypt) — Bcrypt encryption
-- [pbkdf2](https://github.com/RustCrypto/password-hashes) — PBKDF2 hashing
-- [turso](https://github.com/tursodatabase/turso-client-rust) — Turso/libSQL client
-- [qrcode](https://github.com/mynanism/qrcode-rust) — QR code generation
-- [russh](https://github.com/warp-tech/russh) — SSH / SFTP client
-- [native-tls](https://github.com/sfackler/rust-native-tls) — TLS certificate validation
+The binary is at `target/release/qi-toolbox.exe`.
 
 ### License
 

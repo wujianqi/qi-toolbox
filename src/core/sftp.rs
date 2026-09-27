@@ -174,21 +174,33 @@ pub fn spawn_worker(sink: MsgSink<SftpMsg>) -> (mpsc::Sender<SftpCmd>, Arc<Atomi
                     if r.is_ok() {
                         state.dir_cache.clear();
                     }
-                    finish_op(&rt, &mut state, &sink, r, lang::SFTP_DONE_MKDIR().to_string());
+                    finish_op(
+                        &rt,
+                        &mut state,
+                        &sink,
+                        r,
+                        lang::SFTP_DONE_MKDIR().to_string(),
+                    );
                 }
                 SftpCmd::Delete { path, is_dir } => {
                     let r = rt.block_on(delete(&state, &path, is_dir));
                     if r.is_ok() {
                         state.dir_cache.clear();
                     }
-                    finish_op(&rt, &mut state, &sink, r, lang::SFTP_DONE_DELETE().to_string());
+                    finish_op(
+                        &rt,
+                        &mut state,
+                        &sink,
+                        r,
+                        lang::SFTP_DONE_DELETE().to_string(),
+                    );
                 }
                 SftpCmd::Upload { local, remote } => {
                     let r = rt.block_on(upload(&state, &local, &remote));
                     if r.is_ok() {
                         state.dir_cache.clear();
                     }
-                    let ok_msg = lang::SFTP_DONE_UPLOAD().replace("{}", &remote);
+                    let ok_msg = lang::SFTP_DONE_UPLOAD(remote);
                     finish_op(&rt, &mut state, &sink, r, ok_msg);
                 }
                 SftpCmd::Download { remote, local_dir } => {
@@ -196,7 +208,7 @@ pub fn spawn_worker(sink: MsgSink<SftpMsg>) -> (mpsc::Sender<SftpCmd>, Arc<Atomi
                     if r.is_ok() {
                         state.dir_cache.clear();
                     }
-                    let ok_msg = lang::SFTP_DONE_DOWNLOAD().replace("{}", &remote);
+                    let ok_msg = lang::SFTP_DONE_DOWNLOAD(remote);
                     finish_op(&rt, &mut state, &sink, r, ok_msg);
                 }
                 SftpCmd::Exec { command } => {
@@ -261,11 +273,11 @@ async fn exec_command(
     let mut channel = ssh
         .channel_open_session()
         .await
-        .map_err(|e| lang::SFTP_ERR_EXEC().replace("{}", &e.to_string()))?;
+        .map_err(|e| lang::SFTP_ERR_EXEC(e.to_string()))?;
     channel
         .exec(true, command.as_bytes())
         .await
-        .map_err(|e| lang::SFTP_ERR_EXEC().replace("{}", &e.to_string()))?;
+        .map_err(|e| lang::SFTP_ERR_EXEC(e.to_string()))?;
     let mut out = String::new();
     loop {
         tokio::select! {
@@ -305,29 +317,29 @@ async fn connect(
     let config = Arc::new(russh::client::Config::default());
     let mut session = russh::client::connect(config, (host, port), SshHandler)
         .await
-        .map_err(|e| lang::SFTP_ERR_CONNECT().replace("{}", &e.to_string()))?;
+        .map_err(|e| lang::SFTP_ERR_CONNECT(e.to_string()))?;
     let auth = session
         .authenticate_password(user, pass)
         .await
-        .map_err(|e| lang::SFTP_ERR_CONNECT().replace("{}", &e.to_string()))?;
+        .map_err(|e| lang::SFTP_ERR_CONNECT(e.to_string()))?;
     if !auth.success() {
         return Err(lang::SFTP_ERR_AUTH().to_string());
     }
     let channel = session
         .channel_open_session()
         .await
-        .map_err(|e| lang::SFTP_ERR_CONNECT().replace("{}", &e.to_string()))?;
+        .map_err(|e| lang::SFTP_ERR_CONNECT(e.to_string()))?;
     channel
         .request_subsystem(true, "sftp")
         .await
-        .map_err(|e| lang::SFTP_ERR_CONNECT().replace("{}", &e.to_string()))?;
+        .map_err(|e| lang::SFTP_ERR_CONNECT(e.to_string()))?;
     let sftp = SftpSession::new(channel.into_stream())
         .await
-        .map_err(|e| lang::SFTP_ERR_CONNECT().replace("{}", &e.to_string()))?;
+        .map_err(|e| lang::SFTP_ERR_CONNECT(e.to_string()))?;
     let cwd = sftp
         .canonicalize(".")
         .await
-        .map_err(|e| lang::SFTP_ERR_CONNECT().replace("{}", &e.to_string()))?;
+        .map_err(|e| lang::SFTP_ERR_CONNECT(e.to_string()))?;
     Ok((session, sftp, cwd))
 }
 
@@ -366,7 +378,7 @@ async fn list(
     let dir = sftp
         .read_dir(path)
         .await
-        .map_err(|e| lang::SFTP_ERR_LIST().replace("{}", &e.to_string()))?;
+        .map_err(|e| lang::SFTP_ERR_LIST(e.to_string()))?;
     for f in dir {
         let m = f.metadata();
         out.push(SftpEntry {
@@ -388,16 +400,14 @@ async fn mkdir(state: &WorkerState, path: &str) -> Result<(), String> {
     };
     sftp.create_dir(path)
         .await
-        .map_err(|e| lang::SFTP_ERR_MKDIR().replace("{}", &e.to_string()))
+        .map_err(|e| lang::SFTP_ERR_MKDIR(e.to_string()))
 }
 
 async fn delete(state: &WorkerState, path: &str, is_dir: bool) -> Result<(), String> {
     let Some(sftp) = &state.sftp else {
         return need_conn();
     };
-    let err = |e: russh_sftp::client::error::Error| {
-        lang::SFTP_ERR_DELETE().replace("{}", &e.to_string())
-    };
+    let err = |e: russh_sftp::client::error::Error| lang::SFTP_ERR_DELETE(e.to_string());
     if is_dir {
         // 目录必须递归删：remove_dir 只能删空目录
         delete_dir_recursive(sftp, path).await
@@ -416,23 +426,21 @@ fn delete_dir_recursive<'a>(
         let dir = sftp
             .read_dir(path)
             .await
-            .map_err(|e| lang::SFTP_ERR_DELETE().replace("{}", &e.to_string()))?;
+            .map_err(|e| lang::SFTP_ERR_DELETE(e.to_string()))?;
         for f in dir {
             let is_dir = f.metadata().is_dir();
             let child = join_path(path, &f.file_name());
             if is_dir {
                 delete_dir_recursive(sftp, &child).await?;
             } else {
-                sftp
-                    .remove_file(&child)
+                sftp.remove_file(&child)
                     .await
-                    .map_err(|e| lang::SFTP_ERR_DELETE().replace("{}", &e.to_string()))?;
+                    .map_err(|e| lang::SFTP_ERR_DELETE(e.to_string()))?;
             }
         }
-        sftp
-            .remove_dir(path)
+        sftp.remove_dir(path)
             .await
-            .map_err(|e| lang::SFTP_ERR_DELETE().replace("{}", &e.to_string()))
+            .map_err(|e| lang::SFTP_ERR_DELETE(e.to_string()))
     })
 }
 
@@ -440,30 +448,29 @@ async fn upload(state: &WorkerState, local: &str, remote: &str) -> Result<(), St
     let Some(sftp) = &state.sftp else {
         return need_conn();
     };
-    let mut file = std::fs::File::open(local)
-        .map_err(|e| lang::SFTP_ERR_UPLOAD().replace("{}", &e.to_string()))?;
+    let mut file = std::fs::File::open(local).map_err(|e| lang::SFTP_ERR_UPLOAD(e.to_string()))?;
     let mut f = sftp
         .open_with_flags(
             remote,
             OpenFlags::CREATE | OpenFlags::TRUNCATE | OpenFlags::WRITE | OpenFlags::READ,
         )
         .await
-        .map_err(|e| lang::SFTP_ERR_UPLOAD().replace("{}", &e.to_string()))?;
+        .map_err(|e| lang::SFTP_ERR_UPLOAD(e.to_string()))?;
     // 分块流式上传（64 KiB 缓冲），避免大文件整体读入内存
     let mut buf = vec![0u8; 64 * 1024];
     loop {
         let n = std::io::Read::read(&mut file, &mut buf)
-            .map_err(|e| lang::SFTP_ERR_UPLOAD().replace("{}", &e.to_string()))?;
+            .map_err(|e| lang::SFTP_ERR_UPLOAD(e.to_string()))?;
         if n == 0 {
             break;
         }
         f.write_all(&buf[..n])
             .await
-            .map_err(|e| lang::SFTP_ERR_UPLOAD().replace("{}", &e.to_string()))?;
+            .map_err(|e| lang::SFTP_ERR_UPLOAD(e.to_string()))?;
     }
     f.flush()
         .await
-        .map_err(|e| lang::SFTP_ERR_UPLOAD().replace("{}", &e.to_string()))?;
+        .map_err(|e| lang::SFTP_ERR_UPLOAD(e.to_string()))?;
     let _ = f.shutdown().await;
     Ok(())
 }
@@ -477,24 +484,24 @@ async fn download(state: &WorkerState, remote: &str, local_dir: &str) -> Result<
         .map(|n| n.to_string_lossy().to_string())
         .unwrap_or_else(|| remote.to_string());
     let dest = std::path::Path::new(local_dir).join(fname);
-    let mut file = std::fs::File::create(&dest)
-        .map_err(|e| lang::SFTP_ERR_DOWNLOAD().replace("{}", &e.to_string()))?;
+    let mut file =
+        std::fs::File::create(&dest).map_err(|e| lang::SFTP_ERR_DOWNLOAD(e.to_string()))?;
     let mut f = sftp
         .open(remote)
         .await
-        .map_err(|e| lang::SFTP_ERR_DOWNLOAD().replace("{}", &e.to_string()))?;
+        .map_err(|e| lang::SFTP_ERR_DOWNLOAD(e.to_string()))?;
     // 分块流式下载（64 KiB 缓冲），避免大文件整体驻留内存
     let mut buf = vec![0u8; 64 * 1024];
     loop {
         let n = f
             .read(&mut buf)
             .await
-            .map_err(|e| lang::SFTP_ERR_DOWNLOAD().replace("{}", &e.to_string()))?;
+            .map_err(|e| lang::SFTP_ERR_DOWNLOAD(e.to_string()))?;
         if n == 0 {
             break;
         }
         std::io::Write::write_all(&mut file, &buf[..n])
-            .map_err(|e| lang::SFTP_ERR_DOWNLOAD().replace("{}", &e.to_string()))?;
+            .map_err(|e| lang::SFTP_ERR_DOWNLOAD(e.to_string()))?;
     }
     let _ = f.shutdown().await;
     Ok(())
@@ -536,5 +543,36 @@ pub fn human_size(bytes: u64) -> String {
         format!("{:.1} KB", b / KB)
     } else {
         format!("{} B", bytes)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{human_size, join_path, parent_path};
+
+    #[test]
+    fn join_path_cases() {
+        assert_eq!(join_path("/", "a"), "/a");
+        assert_eq!(join_path("/a", "b"), "/a/b");
+        assert_eq!(join_path("/a/", "b"), "/a/b");
+        assert_eq!(join_path("/a/b", "c.txt"), "/a/b/c.txt");
+    }
+
+    #[test]
+    fn parent_path_cases() {
+        assert_eq!(parent_path("/a/b"), "/a");
+        assert_eq!(parent_path("/a"), "/");
+        assert_eq!(parent_path("/"), "/");
+        assert_eq!(parent_path("/a/b/"), "/a"); // 尾斜杠容忍
+        assert_eq!(parent_path(""), "/");
+    }
+
+    #[test]
+    fn human_size_units() {
+        assert_eq!(human_size(0), "0 B");
+        assert_eq!(human_size(512), "512 B");
+        assert_eq!(human_size(2048), "2.0 KB");
+        assert_eq!(human_size(5 * 1024 * 1024), "5.00 MB");
+        assert_eq!(human_size(3 * 1024 * 1024 * 1024), "3.00 GB");
     }
 }

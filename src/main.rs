@@ -8,8 +8,10 @@
 #![windows_subsystem = "windows"]
 
 mod core;
+#[path = "i18n/lang.rs"]
 mod lang;
 mod ui;
+mod widgets;
 
 #[cfg(windows)]
 fn hide_console_window() {
@@ -21,36 +23,24 @@ fn hide_console_window() {
         if hwnd != 0 {
             ShowWindow(hwnd, SW_HIDE);
         }
-    }	
+    }
 }
 
 #[cfg(not(windows))]
 fn hide_console_window() {}
 
-/// 启动时检测系统语言：主语言为中文（LANGID 主语言 0x04，含简繁）则界面默认中文，否则英文。
-/// 用户可在主面板「中 / EN」手动覆盖。
-#[cfg(windows)]
-fn detect_system_language() {
-    use crate::lang::{self, LANG_EN, LANG_ZH};
-    use windows_sys::Win32::Globalization::GetUserDefaultUILanguage;
-    let lang_id = unsafe { GetUserDefaultUILanguage() };
-    // LANGID：低 10 位为主语言；LANG_CHINESE = 0x04
-    lang::set_current(if (lang_id & 0x3FF) == 0x04 { LANG_ZH } else { LANG_EN });
-}
-
-#[cfg(not(windows))]
-fn detect_system_language() {}
-
 fn main() {
     hide_console_window();
-    detect_system_language(); // 跟随系统语言自动选择（中文系统→中文，非中文→英文）
+    // 装载 i18n 译文（Initial::System 跟随系统语言：中文系统→zh-CN，非中文→en）
+    lang::install();
     // 文件日志：先初始化（含全局 panic hook），再记录启动信息到缓存目录 logs/
     crate::core::log::init();
-    let lang_label = if crate::lang::current() == crate::lang::LANG_ZH {
-        "zh"
-    } else {
-        "en"
-    };
+    // 本地存储库（store.db）：建表 + 旧文件数据一次性导入（失败仅记日志，不阻断启动）
+    if let Err(e) = crate::core::store::init() {
+        crate::core::log::warn("store", &e);
+    }
+    migrate_legacy_key_file();
+    let lang_label = if lang::is_zh() { "zh" } else { "en" };
     crate::core::log::info(
         "app",
         &format!(
@@ -62,4 +52,40 @@ fn main() {
         ),
     );
     ui::run();
+}
+
+/// 遗留 `qi_key.txt`（工作目录下的 2FA 密钥）一次性迁入 store kv 表后删除。
+/// 敏感键按 settings 的加密规则写库；无加密后端/失败时保留旧文件不动。
+fn migrate_legacy_key_file() {
+    const KEY: &str = "totp.key";
+    let legacy = std::path::Path::new("qi_key.txt");
+    let Ok(text) = std::fs::read_to_string(legacy) else {
+        return;
+    };
+    let key = text.trim();
+    if key.is_empty() {
+        let _ = std::fs::remove_file(legacy);
+        return;
+    }
+    // 已有记忆的密钥则不覆盖（以库中为准）
+    let exists = crate::core::store::kv_all()
+        .ok()
+        .and_then(|kvs| kvs.iter().find(|(k, _)| k == KEY).map(|(_, _)| ()))
+        .is_some();
+    if exists {
+        let _ = std::fs::remove_file(legacy);
+        return;
+    }
+    // 复用 settings 的加密路径：借 commit 的映射语义（拼装一次性 map 不方便，直接走 protect）
+    if crate::core::settings::is_secret_key(KEY) {
+        let enc = (|| -> Option<String> {
+            let cipher = crate::core::settings::protect(key.as_bytes()).ok()?;
+            Some(String::from_utf8_lossy(&cipher).into_owned())
+        })();
+        if let Some(enc) = enc {
+            if crate::core::store::kv_set(&[(KEY, enc.as_str())]).is_ok() {
+                let _ = std::fs::remove_file(legacy);
+            }
+        }
+    }
 }

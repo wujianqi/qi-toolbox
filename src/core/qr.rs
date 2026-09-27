@@ -48,3 +48,28 @@ pub fn qr_rgba(text: &str) -> Result<(Vec<u8>, u32, u32), String> {
 
     Ok((rgba, width, height))
 }
+
+#[cfg(test)]
+mod tests {
+    use super::qr_rgba;
+
+    #[test]
+    fn qr_rgba_shape() {
+        let (rgba, w, h) = qr_rgba("https://example.com/otp?x=1").expect("编码成功");
+        assert!(w > 0 && h > 0 && w == h, "二维码应为正方形");
+        assert_eq!(w % 4, 0, "放大 4 倍");
+        assert_eq!(rgba.len(), (w * h * 4) as usize);
+        // alpha 通道全不透明
+        assert!(rgba.iter().skip(3).step_by(4).all(|&a| a == 255));
+        // 左上定位角中心应为黑色（值 0）
+        let center = ((2 * 4) * w as usize + 2 * 4) * 4;
+        assert_eq!(rgba[center], 0);
+    }
+
+    #[test]
+    fn qr_rgba_too_long_data_errors() {
+        // 超过 QR 最大容量（约 2953 字节）必须返回 Err 而非 panic
+        let big = "a".repeat(4000);
+        assert!(qr_rgba(&big).is_err());
+    }
+}

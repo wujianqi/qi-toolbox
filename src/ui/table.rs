@@ -24,6 +24,31 @@ pub fn default_visible(len: usize) -> Vec<bool> {
     (0..len).map(|i| i < DEFAULT_VISIBLE_COLS).collect()
 }
 
+/// 详情视图单元格文本的信号池：按索引复用 thread_local 槽位，永不随重建回收。
+/// 不能在 `build_table_view` 里 `signal(cell)` 现建——主题切换整树重建会 dispose
+/// 构建期信号，`SelectText` 持有的句柄即成死句柄，再读即 panic（signal.rs:545）。
+/// 每次构建详情时按位置取池中信号并刷新值；池按需扩容，缩容不回收（槽位廉价）。
+fn cell_text_sig(i: usize, value: &str) -> Signal<String> {
+    use std::cell::RefCell;
+    thread_local! {
+        static POOL: RefCell<Vec<Signal<String>>> = RefCell::new(Vec::new());
+    }
+    POOL.with(|p| {
+        let mut p = p.borrow_mut();
+        // 自愈：首建若发生在整树重建的 SignalScope 内会被收走（is_alive=false），
+        // 此时换新槽位重建，避免残留死句柄（读取即 panic）。调用方随后回填值。
+        if i >= p.len() {
+            p.resize_with(i + 1, || signal(String::new()));
+        }
+        if !p[i].is_alive() {
+            p[i] = signal(String::new());
+        }
+        let s = p[i];
+        s.set(value.to_string());
+        s
+    })
+}
+
 /// 列表视图单元格展示上限（字符）：超长 TEXT 在**渲染层**截断，避免 label 的
 /// `truncate` 对全串做 O(N) 文本测量拖慢虚拟列表滚动重建。
 /// 业务层存完整值（`core::turso` 不截断），详情视图读全文，不受此限。
@@ -47,78 +72,76 @@ pub const ROW_H: i32 = 32;
 pub fn render_table_list(
     tables: Signal<Vec<String>>,
     selected: Signal<Option<String>>,
-    make_source: impl Fn() -> TursoSource + 'static,
+    make_source: impl Fn() -> Option<TursoSource> + 'static,
     tx: Sender<core::db::DbMsg>,
     loading: Signal<bool>,
     pending: Signal<Option<(String, usize)>>,
 ) -> Element {
     // row_fn 是 Fn（可多次调用），make_source 非 Clone（impl Fn），Rc 包装供内层点击回调共享
     let make_source = std::rc::Rc::new(make_source);
-    Element::virtual_list(
-        tables,
-        30,
-        move |_idx, name: String| {
-            let is_sel = selected.get().as_deref() == Some(name.as_str());
-            // 官方 virtual_list 的 row_fn 是 Fn（可多次调用），先克隆 tx 供内层 move 闭包捕获
-            let tx = tx.clone();
-            let make_source = std::rc::Rc::clone(&make_source);
-            // 输入法候选窗风格：选中行 = 左侧强调条 + 浅色底；悬停由 clickable 提供淡层
-            let tint = if is_sel {
-                Role::Accent.resolve(&windui::theme::current())
-            } else {
-                Role::TextMuted.resolve(&windui::theme::current())
-            };
-            let mut row = Element::row()
-                .width_match()
-                .height(30)
-                .cross(Align::Center)
-                .spacing(8)
-                .padding_xy(8, 0)
-                .child(
-                    Element::leaf()
-                        .width(3)
-                        .height(20)
-                        .bg_role_alpha(Role::Accent, if is_sel { 0.9 } else { 0.0 })
-                        .corner(1.5),
+    Element::virtual_list(tables, 30, move |_idx, name: String| {
+        let is_sel = selected.get().as_deref() == Some(name.as_str());
+        // 官方 virtual_list 的 row_fn 是 Fn（可多次调用），先克隆 tx 供内层 move 闭包捕获
+        let tx = tx.clone();
+        let make_source = std::rc::Rc::clone(&make_source);
+        // 输入法候选窗风格：选中行 = 左侧强调条 + 浅色底；悬停由 clickable 提供淡层
+        let tint = if is_sel {
+            Role::Accent.resolve(&windui::theme::current())
+        } else {
+            Role::TextMuted.resolve(&windui::theme::current())
+        };
+        let mut row = Element::row()
+            .width_match()
+            .height(30)
+            .cross(Align::Center)
+            .spacing(8)
+            .padding_xy(8, 0)
+            .child(
+                Element::leaf()
+                    .width(3)
+                    .height(20)
+                    .bg_role_alpha(Role::Accent, if is_sel { 0.9 } else { 0.0 })
+                    .corner(1.5),
+            )
+            .child(
+                // 表名图标：选中随强调色亮起，未选中为弱化灰
+                Element::image_content(
+                    ImageContent::from_svg_bytes(icons::TABLE_ICON, Some(15)).tint(tint),
                 )
-                .child(
-                    // 表名图标：选中随强调色亮起，未选中为弱化灰
-                    Element::image_content(
-                        ImageContent::from_svg_bytes(icons::TABLE_ICON, Some(15)).tint(tint),
-                    )
-                    .align(Align::Center),
-                )
-                .child(
-                    Element::label(&name)
-                        .font_size(13.0)
-                        .font_weight(if is_sel { 600 } else { 400 })
-                        .fg_role(if is_sel { Role::Text } else { Role::TextMuted })
-                        .weight(1.0)
-                        // 不 truncate：max_lines(1) 的 clip 裁剪即可防溢出，
-                        // 避免 truncate 的 O(N) 逐字符测量（虚拟列表重建时每实例缓存失效）
-                        .max_lines(1),
-                );
+                .align(Align::Center),
+            )
+            .child(
+                Element::label(&name)
+                    .font_size(13.0)
+                    .font_weight(if is_sel { 600 } else { 400 })
+                    .fg_role(if is_sel { Role::Text } else { Role::TextMuted })
+                    .weight(1.0)
+                    // 不 truncate：max_lines(1) 的 clip 裁剪即可防溢出，
+                    // 避免 truncate 的 O(N) 逐字符测量（虚拟列表重建时每实例缓存失效）
+                    .max_lines(1),
+            );
+        if is_sel {
+            row = row.bg_role_alpha(Role::Accent, 0.12).corner(4.0);
+        }
+        row.clickable().on_click(move |_| {
             if is_sel {
-                row = row.bg_role_alpha(Role::Accent, 0.12).corner(4.0);
+                return;
             }
-            row.clickable().on_click(move |_| {
-                if is_sel {
-                    return;
-                }
-                selected.set(Some(name.clone()));
-                // 节流：已在加载则只记录排队表，不并发开新连接（连点不卡死）
-                if loading.get() {
-                    pending.set(Some((name.clone(), 0)));
-                    return;
-                }
-                loading.set(true);
-                // 异步加载表数据（第 1 页），结果经 channel 回传 UI 线程
-                core::db::spawn_load_table(sink(tx.clone()), make_source(), name.clone(), 0);
-                // 强制触发虚拟列表重建，刷新选中高亮
-                tables.set(tables.get());
-            })
-        },
-    )
+            selected.set(Some(name.clone()));
+            // 节流：已在加载则只记录排队表，不并发开新连接（连点不卡死）
+            if loading.get() {
+                pending.set(Some((name.clone(), 0)));
+                return;
+            }
+            loading.set(true);
+            // 异步加载表数据（第 1 页），结果经 channel 回传 UI 线程
+            if let Some(src) = make_source() {
+                core::db::spawn_load_table(sink(tx.clone()), src, name.clone(), 0);
+            }
+            // 强制触发虚拟列表重建，刷新选中高亮
+            tables.set(tables.get());
+        })
+    })
     .bg_role(Role::SurfaceAlt)
     .corner(6.0)
 }
@@ -128,7 +151,162 @@ pub fn render_data_table(
     meta: Signal<Vec<core::db::TablePage>>,
     rows: Signal<Vec<Vec<String>>>,
 ) -> Element {
-    Element::host_signal(meta, move |t: core::db::TablePage| build_table_view(&t, meta, rows))
+    Element::host_signal(meta, move |t: core::db::TablePage| {
+        build_table_view(&t, meta, rows)
+    })
+}
+
+/// 分级表列表的摊平行模型（供虚拟列表逐行渲染）
+#[derive(Clone)]
+enum GroupedRow {
+    /// 组头（库/schema）：名称 + 表数 + 是否展开
+    Group {
+        name: String,
+        count: usize,
+        open: bool,
+    },
+    /// 表行：所属组 + 表名（key = "组.表" 用于高亮）
+    Table {
+        group: String,
+        table: String,
+        key: String,
+    },
+}
+
+/// 分级表列表（MySQL/PG 页专用）：两级结构——第一级为组（库/schema，点击展开/收起），
+/// 第二级为表（点击加载数据，节流防连点）。`selected_key` = "组.表"（用于高亮）。
+/// 展开状态收在 `expanded` 信号（HashSet 语义：空串集合 = 全部收起）。
+///
+/// 性能：摊平成行模型交给 `virtual_list` 只渲染视口内行——数百表也不卡顿
+/// （原 host_signal 为每张表构建真实子树，任何状态变化都整列重建）。
+pub fn render_grouped_table_list(
+    groups: Signal<Vec<(String, Vec<String>)>>,
+    selected_key: Signal<String>,
+    expanded: Signal<Vec<String>>,
+    on_table_click: impl Fn(String, String) + Clone + 'static,
+) -> Element {
+    let on_click = std::rc::Rc::new(on_table_click);
+    // 摊平：组头行 + 展开组的表行。派生信号随 groups 重算；expanded 变化后
+    // 由点击回调 groups.set(get()) 触发重算（map 只注册 groups 一个依赖）。
+    let flat = groups.map(move |gs: &Vec<(String, Vec<String>)>| {
+        let open = expanded.get();
+        let mut rows = Vec::new();
+        for (g, ts) in gs {
+            let is_open = open.iter().any(|e| e == g);
+            rows.push(GroupedRow::Group {
+                name: g.clone(),
+                count: ts.len(),
+                open: is_open,
+            });
+            if is_open {
+                for t in ts {
+                    rows.push(GroupedRow::Table {
+                        group: g.clone(),
+                        table: t.clone(),
+                        key: format!("{}.{}", g, t),
+                    });
+                }
+            }
+        }
+        rows
+    });
+
+    Element::virtual_list(flat, 28, move |_idx, row: GroupedRow| match row {
+        GroupedRow::Group { name, count, open } => {
+            let (exp, groups_sig) = (expanded, groups);
+            let group_click = name.clone();
+            Element::row()
+                .width_match()
+                .height(28)
+                .cross(Align::Center)
+                .spacing(6)
+                .padding_xy(8, 0)
+                .clickable()
+                .on_click(move |_| {
+                    exp.update(|v| {
+                        if let Some(pos) = v.iter().position(|e| e == &group_click) {
+                            v.remove(pos);
+                        } else {
+                            v.push(group_click.clone());
+                        }
+                    });
+                    // 触发摊平重算 + 虚拟列表重建（expanded 不在派生依赖里）
+                    groups_sig.set(groups_sig.get());
+                })
+                .child(
+                    Element::label(if open { "\u{25BE}" } else { "\u{25B8}" })
+                        .font_size(11.0)
+                        .fg_role(Role::TextMuted)
+                        .width(14),
+                )
+                .child(
+                    // 库/schema 组头图标（数据库圆柱体）
+                    Element::image_content(
+                        ImageContent::from_svg_bytes(icons::DATABASE, Some(14))
+                            .tint(Role::Accent.resolve(&windui::theme::current())),
+                    )
+                    .align(Align::Center),
+                )
+                .child(
+                    Element::label(name)
+                        .font_size(13.0)
+                        .font_weight(600)
+                        .fg_role(Role::Text)
+                        .weight(1.0)
+                        .max_lines(1),
+                )
+                .child(
+                    Element::label(format!("{}", count))
+                        .font_size(11.0)
+                        .fg_role(Role::TextMuted),
+                )
+        }
+        GroupedRow::Table { group, table, key } => {
+            let is_sel = selected_key.get() == key;
+            let tint = if is_sel {
+                Role::Accent.resolve(&windui::theme::current())
+            } else {
+                Role::TextMuted.resolve(&windui::theme::current())
+            };
+            let mut row = Element::row()
+                .width_match()
+                .height(28)
+                .cross(Align::Center)
+                .spacing(8)
+                .padding_xy(24, 0) // 二级缩进
+                .child(
+                    Element::leaf()
+                        .width(3)
+                        .height(18)
+                        .bg_role_alpha(Role::Accent, if is_sel { 0.9 } else { 0.0 })
+                        .corner(1.5),
+                )
+                .child(
+                    Element::image_content(
+                        ImageContent::from_svg_bytes(icons::TABLE_ICON, Some(14)).tint(tint),
+                    )
+                    .align(Align::Center),
+                )
+                .child(
+                    Element::label(table.clone())
+                        .font_size(13.0)
+                        .font_weight(if is_sel { 600 } else { 400 })
+                        .fg_role(if is_sel { Role::Text } else { Role::TextMuted })
+                        .weight(1.0)
+                        .max_lines(1),
+                );
+            if is_sel {
+                row = row.bg_role_alpha(Role::Accent, 0.12).corner(4.0);
+            }
+            let on_click = std::rc::Rc::clone(&on_click);
+            let groups_sig = groups;
+            row.clickable().on_click(move |_| {
+                on_click(group.clone(), table.clone());
+                // 刷新选中高亮（selected_key 不在派生依赖里）
+                groups_sig.set(groups_sig.get());
+            })
+        }
+    })
 }
 
 /// 构建单个表格视图（表头信息行 + 列表/详情二选一）
@@ -179,13 +357,9 @@ fn build_table_view(
                 .fg_role(Role::Text),
         )
         .child(
-            Element::label(
-                lang::DT_COL_ROW()
-                    .replacen("{}", &t.columns.len().to_string(), 1)
-                    .replacen("{}", &t.row_count.to_string(), 1),
-            )
-            .font_size(11.0)
-            .fg_role(Role::TextMuted),
+            Element::label(lang::DT_COL_ROW(t.columns.len(), t.row_count))
+                .font_size(11.0)
+                .fg_role(Role::TextMuted),
         );
     // 隐藏列提示：其余列在列设置面板中勾选显示
     let hidden = t
@@ -196,7 +370,7 @@ fn build_table_view(
         .count();
     if hidden > 0 {
         info_row = info_row.child(
-            Element::label(lang::DT_COL_MORE().replace("{}", &hidden.to_string()))
+            Element::label(lang::DT_COL_MORE(hidden))
                 .font_size(11.0)
                 .fg_role(Role::TextMuted),
         );
@@ -227,7 +401,7 @@ fn build_table_view(
                     .cross(Align::Center)
                     .child(back)
                     .child(
-                        Element::label(lang::DT_ROW_DETAIL().replace("{}", &(sel + 1).to_string()))
+                        Element::label(lang::DT_ROW_DETAIL(sel + 1))
                             .font_size(13.0)
                             .font_weight(700),
                     ),
@@ -247,8 +421,9 @@ fn build_table_view(
                         .child(
                             // 详情值用只读可选文本承载：高度不写死，随内容行数上下浮动
                             // （SelectText 未约束高度时按内容返回固有高度），可选中复制
-                            // （构建期信号随重建自动回收）
-                            select_text(signal(cell.to_string()))
+                            // 信号从 thread_local 池按索引复用并就地刷新值，
+                            // 不在构建期新建（防主题切换整树回收后成死句柄）
+                            select_text(cell_text_sig(col_i, cell))
                                 .width_match()
                                 .weight(1.0),
                         ),

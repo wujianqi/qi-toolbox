@@ -1,21 +1,25 @@
 [profile.release]
 opt-level = "z"     # 优化体积
-lto = true          # 链接时优化
-codegen-units = 1   # 单编译单元，更好优化
+lto = "fat"
+codegen-units = 1  # 最大程度交叉优化，牺牲编译时间换更小体积
 strip = true        # 剥离符号
 panic = "abort"     # 减少 unwind 表
 
 [package]
 name = "qi-toolbox"
-version = "0.1.2"
+version = "0.2.0"
 edition = "2021"
-description = "Qi Toolbox - 2FA验证码生成、随机密码、Turso数据库浏览、SFTP/SSH"
+description = "奇兔宝 (Qi Toolbox) - 2FA验证码、随机密码、数据库浏览(Turso/MySQL/PG)、SFTP/SSH、S3浏览、远程检测"
 license = "MIT"
 repository = "https://github.com/wujianqi/qi-toolbox"
 
 [[bin]]
 name = "qi-toolbox"
 path = "src/main.rs"
+
+[lib]
+name = "qi_toolbox"
+path = "src/lib.rs"
 
 # Windows GUI 应用程序，不显示控制台窗口
 [package.metadata.winres]
@@ -25,23 +29,32 @@ OriginalFilename = "qi-toolbox.exe"
 default = []
 
 [dependencies]
-windui = "0.15"
+windui = "0.20"
 bcrypt = "0.15"
 argon2 = "0.5"
 pbkdf2 = { version = "0.12", features = ["hmac"] }
 sha2 = "0.10"
 md5 = "0.8"
 base64ct = { version = "1", features = ["alloc"] }
+aes-gcm = "0.10"
 getrandom = "0.2"
-totp-rs = { version = "5", features = ["gen_secret", "otpauth"] }
+totp-rs = { version = "5", features = ["otpauth"] }
 qrcode = "0.14"
-turso = { version = "0.7.2", features = ["sync"] }
-tokio = { version = "1", features = ["rt", "io-util", "net", "rt-multi-thread", "time"] }
+turso = { version = "0.7.2", default-features = false, features = ["sync"] }
+tokio = { version = "1", default-features = false, features = ["rt", "rt-multi-thread", "io-util", "time", "sync"] }
 russh = { version = "0.63", default-features = false, features = ["ring", "rsa"] }
 russh-sftp = "2.4"
 url = "2"
-native-tls = "0.2"
 x509-parser = "0.16"
+rusty-s3 = "0.4"
+ureq = { version = "2", default-features = false, features = ["tls"] }
+rustls = { version = "0.23", default-features = false, features = ["std", "ring", "tls12"] }
+rustls-pki-types = "1"
+webpki-roots = "1"
+rfd = "0.14"
+png = "0.18"
+mysql_async = "0.37.1"
+tokio-postgres = "0.7.18"
 
 [target.'cfg(windows)'.dependencies]
 windows-sys = { version = "0.52", features = ["Win32_Foundation", "Win32_Globalization", "Win32_Security_Cryptography", "Win32_System_Console", "Win32_System_Registry", "Win32_UI_WindowsAndMessaging"] }

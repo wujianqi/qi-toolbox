@@ -5,7 +5,7 @@
 //! 页面状态封装在 [`SftpUi`]（run() 中创建，主题重建不丢状态）：
 //! 含全部信号 + 工作线程命令发送端，后台消息统一由 [`SftpUi::on_msg`] 消费。
 
-use std::cell::{Cell, RefCell};
+use std::cell::RefCell;
 use std::rc::Rc;
 use std::sync::atomic::AtomicBool;
 use std::sync::mpsc;
@@ -13,11 +13,7 @@ use std::sync::Arc;
 
 use windui::prelude::*;
 
-use windui::core::{EventCtx, Widget};
-use windui::event::{Event, MouseButton, PointerKind};
-use windui::render::{Canvas, Paint};
-use windui::text::{TextEngine, TextStyle};
-
+use super::sftp_row::{FileRow, RowArt};
 use super::{icons, input_dialog, ssh_cmd};
 use crate::core::sftp;
 use crate::lang;
@@ -46,8 +42,6 @@ pub struct SftpUi {
     /// SSH 命令工具：命令输入 / 输出内容（供独立子窗口 [`cmd_window`] 使用）
     pub cmd_input: Signal<String>,
     pub cmd_output: Signal<String>,
-    /// 命令模板区展开/收起（默认收起，不常驻占空间；子窗内点标题行切换）
-    pub show_tpl: Signal<bool>,
     /// SSH 命令是否执行中（「执行」禁用、「停止」可用、输入区状态提示联动）
     pub cmd_running: Signal<bool>,
     /// 用户自定义命令模板（AppData 持久化，「我的命令」组渲染；顺序即显示顺序）
@@ -56,6 +50,29 @@ pub struct SftpUi {
     pub cmd_add_show: Signal<bool>,
     /// 添加弹窗内的命令输入
     pub cmd_add_input: Signal<String>,
+    /// 常用命令选择器：当前分组索引（对应 cmd_window 的分组表，含「我的命令」末组）
+    pub tpl_group: Signal<usize>,
+    /// 常用命令选择器：搜索关键字（空串 = 不过滤）
+    pub tpl_search: Signal<String>,
+    /// 已保存的 SFTP 站点（store.db 多站点管理）
+    pub sites: Signal<Vec<crate::core::store::SftpSite>>,
+    /// 常用目录书签（store.db sftp_bmks 表，跨会话）
+    pub bmks: Signal<Vec<String>>,
+    /// 站点下拉当前选中索引
+    pub site_sel: Signal<usize>,
+    /// 书签下拉当前选中索引（启动期创建的永生信号：不能在 build_sftp_tab 构建
+    /// 期现建——主题切换整树重建会回收构建期信号，下拉句柄即成死句柄再读即崩）
+    pub bmk_sel: Signal<usize>,
+    /// 站点编辑弹窗显隐与表单（site_edit_id=0 表示新建）
+    pub site_edit_show: Signal<bool>,
+    /// 站点管理弹窗（列表集中管理：编辑/删除）
+    pub site_mgr_show: Signal<bool>,
+    pub site_edit_id: Signal<i64>,
+    pub site_name: Signal<String>,
+    pub site_host: Signal<String>,
+    pub site_port: Signal<String>,
+    pub site_user: Signal<String>,
+    pub site_pass: Signal<String>,
     /// 工作线程命令发送端（`spawn_worker` 后回填）
     cmd: Rc<RefCell<Option<mpsc::Sender<sftp::SftpCmd>>>>,
     /// Exec 中断标志句柄（`spawn_worker` 返回的共享 `Arc<AtomicBool>`，回填后由「停止」置位）
@@ -82,11 +99,24 @@ impl SftpUi {
             delete_items: signal(Vec::new()),
             cmd_input: signal(String::new()),
             cmd_output: signal(String::new()),
-            show_tpl: signal(false),
             cmd_running: signal(false),
             custom_cmds: signal(load_custom_cmds()),
             cmd_add_show: signal(false),
             cmd_add_input: signal(String::new()),
+            tpl_group: signal(0usize),
+            tpl_search: signal(String::new()),
+            sites: signal(crate::core::store::sftp_list().unwrap_or_default()),
+            bmks: signal(crate::core::store::sftp_bmk_list().unwrap_or_default()),
+            site_sel: signal(0usize),
+            bmk_sel: signal(0usize),
+            site_edit_show: signal(false),
+            site_mgr_show: signal(false),
+            site_edit_id: signal(0i64),
+            site_name: signal(String::new()),
+            site_host: signal(String::new()),
+            site_port: signal(String::from("22")),
+            site_user: signal(String::new()),
+            site_pass: signal(String::new()),
             cmd: Rc::new(RefCell::new(None)),
             cancel: Rc::new(RefCell::new(None)),
         }
@@ -128,6 +158,17 @@ impl SftpUi {
                 self.status.set(lang::SFTP_CONNECTED().to_string());
                 self.error.set(String::new());
                 self.cwd.set(cwd);
+                // 记住上次目录：连接成功后自动跳到上次浏览的目录（尽力而为）
+                let last = crate::core::settings::load()
+                    .get("sftp.last_dir")
+                    .cloned()
+                    .unwrap_or_default();
+                if !last.is_empty() {
+                    let _ = self.cmd().send(sftp::SftpCmd::List {
+                        path: last,
+                        force: false,
+                    });
+                }
             }
             sftp::SftpMsg::Connected(Err(e)) => {
                 self.connected.set(false);
@@ -137,7 +178,12 @@ impl SftpUi {
                 self.error.set(e);
             }
             sftp::SftpMsg::Listed(Ok((cwd, list))) => {
-                self.cwd.set(cwd);
+                self.cwd.set(cwd.clone());
+                // 记住上次浏览目录（非敏感项明文，尽力而为）
+                let remember = cwd.clone();
+                std::thread::spawn(move || {
+                    crate::core::settings::commit(&[("sftp.last_dir", Some(remember.as_str()))]);
+                });
                 // 选中项按新列表过滤：被删除/改名而消失的自动落选；切到别的目录
                 // 后旧目录的选中名不匹配，自然整体清空。
                 let names: Vec<String> = list.iter().map(|e| e.name.clone()).collect();
@@ -179,26 +225,18 @@ impl Default for SftpUi {
     }
 }
 
-/// 读取持久化的自定义命令模板（尽力而为：AppData 文件缺失/损坏/被清空一律返回空表）
+/// 读取持久化的自定义命令模板（尽力而为：库读取失败一律返回空表）
 fn load_custom_cmds() -> Vec<String> {
-    let mut out = Vec::new();
-    if let Some(v) = crate::core::settings::load().get("ssh.custom_cmds") {
-        for line in v.split('\n') {
-            let c = line.trim();
-            if !c.is_empty() && !out.iter().any(|s| s == c) {
-                out.push(c.to_string());
-            }
-        }
-    }
-    out
+    crate::core::store::ssh_list()
+        .unwrap_or_default()
+        .iter()
+        .filter(|c| c.category.is_empty())
+        .map(|c| c.command.clone())
+        .collect()
 }
 
-pub fn build_sftp_tab(ui: &SftpUi) -> Element {
+pub fn build_sftp_tab(ui: &SftpUi) -> (Element, Element) {
     let SftpUi {
-        host,
-        port,
-        user,
-        pass,
         connected,
         cwd,
         entries,
@@ -214,7 +252,20 @@ pub fn build_sftp_tab(ui: &SftpUi) -> Element {
     } = ui.clone();
     let cmd = ui.cmd();
 
-    // ── 连接 / 断开（按连接状态互斥显示）──
+    // ── 站点信号（连接行与站点管理弹窗共用；store.db 持久化）──
+    let sites = ui.sites;
+    let site_sel = ui.site_sel;
+    let site_opts = site_sel.map(move |idx| {
+        let list = sites.get();
+        if list.is_empty() {
+            vec![lang::SFTP_SITE_NONE()]
+        } else {
+            vec![list.get(*idx).map(|s| s.name.clone()).unwrap_or_default()]
+        }
+    });
+
+    // ── 连接 / 断开（按连接状态互斥显示）；凭据取自选中站点（账号密码等
+    // 全部收进「管理站点」弹窗，顶部与 S3 页一致保持简洁）──
     let connect = Element::button(lang::SFTP_CONNECT())
         .small()
         .icon_content(icons::stateful_icon(icons::PLUG, Some(16)))
@@ -224,24 +275,14 @@ pub fn build_sftp_tab(ui: &SftpUi) -> Element {
             move |_| {
                 status.set(String::new());
                 error.set(String::new());
-                // 记忆本次连接输入（尽力而为：主机等明文、密码 DPAPI 加密后落盘）
-                let host_s = host.get();
-                let port_s = port.get();
-                let user_s = user.get();
-                let pass_s = pass.get();
-                crate::core::settings::commit(&[
-                    ("sftp.host", Some(host_s.trim())),
-                    ("sftp.port", Some(port_s.trim())),
-                    ("sftp.user", Some(user_s.trim())),
-                    ("sftp.pass", Some(pass_s.as_str())),
-                ]);
-                let p = port.get().trim().parse::<u16>().unwrap_or(22);
-                let _ = cmd.send(sftp::SftpCmd::Connect {
-                    host: host.get().trim().to_string(),
-                    port: p,
-                    user: user.get().trim().to_string(),
-                    pass: pass.get(),
-                });
+                if let Some(s) = sites.get().get(site_sel.get()) {
+                    let _ = cmd.send(sftp::SftpCmd::Connect {
+                        host: s.host.clone(),
+                        port: s.port,
+                        user: s.user.clone(),
+                        pass: s.pass.clone(),
+                    });
+                }
             }
         });
 
@@ -257,25 +298,10 @@ pub fn build_sftp_tab(ui: &SftpUi) -> Element {
             }
         });
 
-    // ── 连接表单 ──
-    let conn_form = Element::col()
-        .spacing(10)
-        .child(
-            Element::row()
-                .spacing(8)
-                .cross(Align::Center)
-                .child(Element::label(lang::SFTP_HOST()).font_size(13.0))
-                .child(Element::text_input(host, "").width(120))
-                .child(Element::label(lang::SFTP_PORT()).font_size(13.0))
-                .child(Element::text_input(port, "22").width(56))
-                .child(Element::label(lang::SFTP_USER()).font_size(13.0))
-                .child(Element::text_input(user, "").width(100))
-                .child(Element::label(lang::SFTP_PASS()).font_size(13.0))
-                // 密码输入：掩码圆点显示，禁止复制/剪切明文
-                .child(Element::text_input(pass, "").password().width(90))
-                .child(connect)
-                .child(disconnect),
-        );
+    // ── 连接行控件 ──
+    fn strip(s: &str) -> &str {
+        s.trim_end_matches([':', '：'])
+    }
 
     // ── 工具栏：上级 / 刷新 / 新建文件夹 / 上传 / 下载 / 删除 ──
     let up = Element::button(lang::SFTP_UP())
@@ -306,6 +332,86 @@ pub fn build_sftp_tab(ui: &SftpUi) -> Element {
                     path: cwd.get(),
                     force: true,
                 });
+            }
+        });
+
+    // ── 目录书签：收藏当前目录 + 书签下拉跳转（store.db sftp_bmks 表）──
+    let bmk_add = Element::button(lang::SFTP_BMK_ADD())
+        .small()
+        .neutral()
+        .icon_content(icons::stateful_icon(icons::SAVE, Some(16)))
+        .enabled_signal(connected)
+        .on_click({
+            let ui = ui.clone();
+            move |_| {
+                let path = ui.cwd.get();
+                if path.is_empty() {
+                    return;
+                }
+                if crate::core::store::sftp_bmk_add(&path).is_ok() {
+                    ui.bmks
+                        .set(crate::core::store::sftp_bmk_list().unwrap_or_default());
+                    ui.status.set(lang::SFTP_BMK_ADDED().to_string());
+                }
+            }
+        });
+    let bmk_sel = ui.bmk_sel;
+    let bmk_opts = bmk_sel.map({
+        let bmks = ui.bmks;
+        move |idx: &usize| {
+            let list = bmks.get();
+            if list.is_empty() {
+                vec![lang::SFTP_BMK_NONE()]
+            } else {
+                vec![list
+                    .get((*idx).min(list.len().saturating_sub(1)))
+                    .cloned()
+                    .unwrap_or_default()]
+            }
+        }
+    });
+    let bmk_jump = {
+        let bmks = ui.bmks;
+        let bmk_sel = bmk_sel;
+        let cmd = cmd.clone();
+        move |_: &mut windui::core::EventCtx| {
+            if let Some(path) = bmks.get().get(bmk_sel.get()) {
+                let _ = cmd.send(sftp::SftpCmd::List {
+                    path: path.clone(),
+                    force: false,
+                });
+            }
+        }
+    };
+    let bmk_jump = Element::dropdown_signal(bmk_opts, bmk_sel)
+        .width(160)
+        .enabled_when({
+            let bmks = ui.bmks;
+            move || !bmks.get().is_empty() && connected.get()
+        })
+        .on_click(bmk_jump);
+    // 删除当前选中的书签（列表为空时隐藏）
+    let bmk_del = Element::button(lang::SFTP_BMK_DEL())
+        .small()
+        .neutral()
+        .danger()
+        .visible_when({
+            let bmks = ui.bmks;
+            move || !bmks.get().is_empty()
+        })
+        .on_click({
+            let ui = ui.clone();
+            let bmk_sel = bmk_sel;
+            move |_| {
+                let list = ui.bmks.get();
+                if let Some(path) = list.get(bmk_sel.get().min(list.len().saturating_sub(1))) {
+                    let path = path.clone();
+                    if crate::core::store::sftp_bmk_del(&path).is_ok() {
+                        ui.bmks
+                            .set(crate::core::store::sftp_bmk_list().unwrap_or_default());
+                        bmk_sel.set(0);
+                    }
+                }
             }
         });
 
@@ -417,7 +523,7 @@ pub fn build_sftp_tab(ui: &SftpUi) -> Element {
                 })
                 .collect();
             delete_items.set(items.clone());
-            delete_msg.set(lang::SFTP_DELETE_CONFIRM_MULTI().replace("{}", &items.len().to_string()));
+            delete_msg.set(lang::SFTP_DELETE_CONFIRM_MULTI(items.len()));
             delete_show.set(true);
         });
 
@@ -444,20 +550,48 @@ pub fn build_sftp_tab(ui: &SftpUi) -> Element {
             }
         });
 
-    let toolbar = Element::row()
-        .width_match()
-        .spacing(8)
+    // ── 连接行：站点下拉 + 连接/断开 + 管理站点 + 标签下拉 + SSH 命令 ──
+    // （后两项放到连接行，避免顶部文件工具栏过挤）
+    let conn_form = Element::row()
+        .spacing(6)
         .cross(Align::Center)
-        .bg_role(Role::Surface)
-        .corner(10.0)
-        .padding_xy(12, 10)
+        .child(
+            Element::dropdown_signal(site_opts, site_sel)
+                .width(180)
+                .on_click({
+                    // 切换站点即自动断开旧连接，避免凭据错配
+                    let cmd = cmd.clone();
+                    move |_| {
+                        let _ = cmd.send(sftp::SftpCmd::Disconnect);
+                    }
+                }),
+        )
+        .child(connect)
+        .child(disconnect)
+        .child(
+            // 新建/编辑/删除集中到「管理站点」弹窗
+            Element::button(lang::SFTP_SITE_MGR())
+                .small()
+                .neutral()
+                .on_click({
+                    let show = ui.site_mgr_show;
+                    move |_| show.set(true)
+                }),
+        )
+        .child(bmk_jump)
+        .child(cmd_btn);
+
+    let toolbar = Element::row()
+        .spacing(6)
+        .cross(Align::Center)
         .child(up)
         .child(refresh)
+        .child(bmk_add)
+        .child(bmk_del)
         .child(mkdir_btn)
         .child(upload_btn)
         .child(download_btn)
         .child(delete_btn)
-        .child(cmd_btn)
         .child(Element::flex_spacer())
         .child(
             Element::label_signal(status)
@@ -499,63 +633,58 @@ pub fn build_sftp_tab(ui: &SftpUi) -> Element {
     let art = RowArt::new();
     let row_builder = move |e: sftp::SftpEntry| {
         Element::leaf()
-            .widget(FileRow::new(e, selected, cwd, cmd_rows.clone(), art.clone()))
+            .widget(FileRow::new(
+                e,
+                selected,
+                cwd,
+                cmd_rows.clone(),
+                art.clone(),
+            ))
             .width_match()
-            .height(30)
+            .height(26)
     };
 
-    let list_area = Element::stack()
-        .weight(1.0)
-        .child(
-            Element::label(lang::SFTP_NO_CONN())
-                .font_size(13.0)
-                .fg_role(Role::TextMuted)
-                .align(Align::Center)
-                .visible_when(move || !connected.get()),
-        )
-        .child(
-            Element::scroll()
-                .fill()
-                .visible_when(move || connected.get())
-                .child(Element::host_signal(entries, row_builder)),
-        );
+    let list_area = Element::stack().weight(1.0).child(
+        Element::scroll()
+            .fill()
+            .visible_when(move || connected.get())
+            .child(Element::host_signal(entries, row_builder)),
+    );
 
     // ── 新建文件夹弹窗 ──
     let mkdir_dialog = input_dialog(
         mkdir_show,
         lang::SFTP_MKDIR_TITLE(),
-        360,
+        620,
         {
             move |_| {
                 mkdir_show.set(false);
                 mkdir_name.set(String::new());
             }
         },
-        Element::text_input(mkdir_name, lang::SFTP_MKDIR_HINT()).width_match(),
+        Element::text_input(mkdir_name, lang::SFTP_MKDIR_HINT())
+            .autofocus()
+            .width_match(),
         Element::row()
             .width_match()
             .child(Element::flex_spacer())
-            .child(
-                Element::button(lang::SFTP_OK())
-                    .small()
-                    .on_click({
-                        let cmd = cmd.clone();
-                        move |_| {
-                            let name = mkdir_name.get().trim().to_string();
-                            if !name.is_empty() {
-                                let _ = cmd.send(sftp::SftpCmd::Mkdir {
-                                    path: sftp::join_path(&cwd.get(), &name),
-                                });
-                            }
-                            mkdir_show.set(false);
-                            mkdir_name.set(String::new());
-                        }
-                    }),
-            ),
+            .child(Element::button(lang::SFTP_OK()).small().on_click({
+                let cmd = cmd.clone();
+                move |_| {
+                    let name = mkdir_name.get().trim().to_string();
+                    if !name.is_empty() {
+                        let _ = cmd.send(sftp::SftpCmd::Mkdir {
+                            path: sftp::join_path(&cwd.get(), &name),
+                        });
+                    }
+                    mkdir_show.set(false);
+                    mkdir_name.set(String::new());
+                }
+            })),
     );
 
     // ── 删除确认弹窗：提示条数（含不可恢复警示）+ 待删项清单，确认后逐个删除 ──
-    let item_icon = icons::StatefulIcon::from_svg(icons::FILE, Some(14));
+    let item_icon = icons::StatefulIcon::from_svg(icons::GENERIC_FILE, Some(14));
     let items_list = Element::host_signal(delete_items, move |(name, path, is_dir)| {
         let icon = if is_dir {
             dialog_folder_icon.as_ref().map(|s| s.content())
@@ -592,7 +721,7 @@ pub fn build_sftp_tab(ui: &SftpUi) -> Element {
     let delete_dialog = Element::dialog_panel(
         delete_show,
         lang::SFTP_DELETE(),
-        420,
+        620,
         move |_| delete_show.set(false),
         Element::col()
             .width_match()
@@ -642,265 +771,299 @@ pub fn build_sftp_tab(ui: &SftpUi) -> Element {
             ),
     );
 
-    // ── 页面：内容 + 两个弹窗（随页显隐）；无标题，紧凑布局把空间让给文件区 ──
-    Element::stack()
-        .fill()
-        .child(
-            Element::col()
-                .padding(12)
-                .spacing(8)
-                .child(conn_form)
-                .child(
-                    Element::col()
-                        .weight(1.0)
-                        .spacing(8)
-                        .child(toolbar)
-                        .child(path_row)
-                        .child(list_area),
-                ),
-        )
-        .child(mkdir_dialog)
-        .child(delete_dialog)
-}
-
-// ───────────────────────────────────────────────────────────────────────
-// 文件行自绘控件：悬停浮现勾选标记
-// ───────────────────────────────────────────────────────────────────────
-
-/// 行图标素材：SVG 一次解析、两张染色图（目录/文件）。`Image` 内部 Rc 共享，
-/// 克隆廉价——整列表共享一份。（选中态不再给图标换色：槽位由勾选标记顶替。）
-#[derive(Clone)]
-struct RowArt {
-    folder: Image,
-    file: Image,
-}
-
-impl RowArt {
-    fn new() -> Self {
-        let muted = windui::theme::current().palette.text_muted;
-        let mk = |bytes: &[u8]| {
-            Image::from_svg_bytes(bytes, Some(15))
-                .map(|img| img.tinted(muted))
-                .expect("内置 SVG 必然可解析")
-        };
-        Self {
-            folder: mk(icons::FOLDER),
-            file: mk(icons::FILE),
+    let sites = ui.sites;
+    let site_sel = ui.site_sel;
+    let _site_opts = site_sel.map(move |idx| {
+        let list = sites.get();
+        if list.is_empty() {
+            vec![lang::SFTP_SITE_NONE()]
+        } else {
+            vec![list.get(*idx).map(|s| s.name.clone()).unwrap_or_default()]
         }
-    }
-}
-
-/// 文件列表行：背景/悬停/勾选标记/图标/文件名/大小全部自绘（行高 30）。
-///
-/// 为什么不用 `label + clickable + 勾选框覆盖层`：常驻勾选框让列表显得表单化，
-/// 且勾选后 `entries.set` 整列表重建会丢掉所有行的悬停态（光标下的勾选框闪没）。
-/// 本控件把悬停做进实例状态、选中态每帧读信号绘制，切换选中只整窗标脏——
-/// 勾选标记仅在悬停/选中时浮现，列表平时完全干净，且无重建闪烁。
-struct FileRow {
-    entry: sftp::SftpEntry,
-    selected: Signal<Vec<String>>,
-    cwd: Signal<String>,
-    cmd: mpsc::Sender<sftp::SftpCmd>,
-    art: RowArt,
-    hover: Cell<bool>,
-}
-
-/// 勾选标记边长（逻辑 px）。悬停未选中时只画框，选中后框内补对勾。
-const CHECK_SIZE: f32 = 16.0;
-/// 行首槽位（图标/勾选标记共用）左缘（相对行左）：不占独立空间，悬停/选中时
-/// 勾选标记**替换**图标，行内容与无多选时的紧凑布局完全一致。
-const SLOT_X: f32 = 10.0;
-/// 勾选命中区右缘（相对行左）：目录"点方框选中、点其余进入"的分界。
-const CHECK_HIT: f32 = 30.0;
-/// 大小列宽（行右缘再内收 [`SIZE_RIGHT_PAD`]）。
-const SIZE_W: f32 = 90.0;
-/// 大小列右缘内收量：避开水印在内容之上的滚动条。
-const SIZE_RIGHT_PAD: f32 = 12.0;
-
-impl FileRow {
-    fn new(
-        entry: sftp::SftpEntry,
-        selected: Signal<Vec<String>>,
-        cwd: Signal<String>,
-        cmd: mpsc::Sender<sftp::SftpCmd>,
-        art: RowArt,
-    ) -> Self {
-        Self {
-            entry,
-            selected,
-            cwd,
-            cmd,
-            art,
-            hover: Cell::new(false),
-        }
-    }
-
-    fn is_sel(&self) -> bool {
-        self.selected.get().contains(&self.entry.name)
-    }
-
-    /// 在多选集合中切换本行（文件/目录通用）。
-    fn toggle_select(&self, ctx: &mut EventCtx) {
-        let name = self.entry.name.clone();
-        self.selected.update(move |v| {
-            if let Some(i) = v.iter().position(|s| *s == name) {
-                v.remove(i);
-            } else {
-                v.push(name);
+    });
+    let _btn_site_new = Element::button(lang::SFTP_SITE_NEW())
+        .small()
+        .outline_soft()
+        .neutral()
+        .on_click({
+            let (show, id, name, site_host, site_port, site_user, site_pass) = (
+                ui.site_edit_show,
+                ui.site_edit_id,
+                ui.site_name,
+                ui.site_host,
+                ui.site_port,
+                ui.site_user,
+                ui.site_pass,
+            );
+            move |_| {
+                id.set(0);
+                // 新建态默认填示例数据，可直接改后保存
+                name.set("示例站点".to_string());
+                site_host.set("127.0.0.1".to_string());
+                site_port.set("22".to_string());
+                site_user.set("root".to_string());
+                site_pass.set(String::new());
+                show.set(true);
             }
         });
-        // 其它行的选中底色同帧随信号刷新
-        ctx.mark_dirty_all();
-    }
-}
-
-impl Widget for FileRow {
-    fn measure(&self, avail: Size, _style: &Style, _text: &mut dyn TextEngine) -> Size {
-        Size::new(avail.w.max(0), 30)
-    }
-
-    fn paint(
-        &self,
-        bounds: Rect,
-        _content: Rect,
-        _focused: bool,
-        _enabled: bool,
-        canvas: &mut dyn Canvas,
-        style: &Style,
-    ) {
-        let t = windui::theme::current();
-        let p = &t.palette;
-        let sel = self.is_sel();
-        let (x, y, w, h) = (
-            bounds.x as f32,
-            bounds.y as f32,
-            bounds.w as f32,
-            bounds.h as f32,
+    let btn_site_save = Element::button(lang::SFTP_SITE_SAVE()).small().on_click({
+        let (_show, id, name, site_host, site_port, site_user, site_pass) = (
+            ui.site_edit_show,
+            ui.site_edit_id,
+            ui.site_name,
+            ui.site_host,
+            ui.site_port,
+            ui.site_user,
+            ui.site_pass,
         );
-
-        // 行底：选中 = 强调色浅底；悬停未选中 = 极淡中性层
-        if sel {
-            canvas.fill_round_rect(x, y, w, h, 6.0, &Paint::fill(p.accent.scale_alpha(0.12)));
-        } else if self.hover.get() {
-            canvas.fill_round_rect(x, y, w, h, 6.0, &Paint::fill(p.text.scale_alpha(0.05)));
-        }
-
-        // 行首槽位（16×16）：悬停/选中时画勾选标记**替换**文件图标（不占额外
-        // 空间，列表平时与紧凑布局一致）；其余时刻画原图标。
-        let slot_x = x + SLOT_X;
-        let slot_y = y + (h - CHECK_SIZE) / 2.0;
-        let show_check = sel || self.hover.get();
-        if show_check {
-            let color = if sel { p.accent } else { p.text_muted };
-            canvas.stroke_round_rect(
-                slot_x,
-                slot_y,
-                CHECK_SIZE,
-                CHECK_SIZE,
-                4.5,
-                1.5,
-                &Paint::fill(color),
-            );
-            if sel {
-                let (px, py) = (slot_x + 3.5, slot_y + 8.0);
-                canvas.draw_polyline(
-                    &[(px, py), (px + 3.0, py + 3.0), (px + 8.5, py - 3.0)],
-                    1.8,
-                    &Paint::fill(p.accent),
-                );
+        move |_| {
+            let n = name.get().trim().to_string();
+            if n.is_empty() {
+                return;
             }
-        } else {
-            let img = if self.entry.is_dir { &self.art.folder } else { &self.art.file };
-            canvas.draw_image(
-                img,
-                Rect::new(slot_x as i32, slot_y as i32, CHECK_SIZE as i32, CHECK_SIZE as i32),
-                Fit::Contain,
-                0.0,
-                1.0,
-            );
-        }
-
-        // 文件名：超宽省略号截断（label 的 truncate 等效，逐字符回退 + "…"）
-        let ts = TextStyle::of(style);
-        let name_x = x + SLOT_X + CHECK_SIZE + 8.0;
-        let name_w = (w - (name_x - x) - SIZE_W - 8.0).max(0.0);
-        let mut disp: String = self.entry.name.clone();
-        if (canvas.measure_text(&disp, &ts).w as f32) > name_w {
-            while !disp.is_empty()
-                && (canvas.measure_text(&format!("{}\u{2026}", disp), &ts).w as f32) > name_w
-            {
-                disp.pop();
+            let site = crate::core::store::SftpSite {
+                id: id.get(),
+                name: n,
+                host: site_host.get().trim().to_string(),
+                port: site_port.get().trim().parse::<u16>().unwrap_or(22),
+                user: site_user.get().trim().to_string(),
+                pass: site_pass.get(),
+            };
+            if crate::core::store::sftp_upsert(&site).is_ok() {
+                sites.set(crate::core::store::sftp_list().unwrap_or_default());
             }
-            disp.push('\u{2026}');
+            // 保存后不关弹窗：继续编辑/新建（关闭仅靠 X / Esc / 点遮罩）
         }
-        canvas.draw_text(
-            &disp,
-            Rect::new(name_x as i32, bounds.y, name_w as i32, bounds.h),
-            style.resolved_fg(&t),
-            Align::Start,
-            &ts,
+    });
+    let site_close = ui.site_edit_show;
+    let site_cancel_close = site_close;
+    let site_dialog = input_dialog(
+        ui.site_edit_show,
+        lang::SFTP_SITE_TITLE(),
+        620,
+        move |_| site_close.set(false),
+        Element::col()
+            .width_match()
+            .spacing(10)
+            .child(
+                Element::text_input(ui.site_name, strip(&lang::SFTP_SITE_NAME()))
+                    .autofocus()
+                    .width_match(),
+            )
+            .child(Element::text_input(ui.site_host, strip(&lang::SFTP_HOST())).width_match())
+            .child(Element::text_input(ui.site_port, strip(&lang::SFTP_PORT())).width_match())
+            .child(Element::text_input(ui.site_user, strip(&lang::SFTP_USER())).width_match())
+            .child(
+                Element::text_input(ui.site_pass, strip(&lang::SFTP_PASS()))
+                    .password()
+                    .width_match(),
+            ),
+        Element::row()
+            .width_match()
+            .child(Element::flex_spacer())
+            .child(
+                Element::button(lang::SFTP_CANCEL())
+                    .small()
+                    .neutral()
+                    .on_click(move |_| site_cancel_close.set(false)),
+            )
+            .child(btn_site_save),
+    );
+
+    // ── 站点管理弹窗：单层双栏（左列表 + 右表单），点行即填右侧表单，
+    // 保存/删除都在同一层完成，不再弹二级编辑窗 ──
+    let mgr_close = ui.site_mgr_show;
+    let _ui_mgr_close = ui.site_mgr_show;
+    let mgr_list_ui = ui.clone();
+    let _mgr_del_ui = ui.clone();
+    let mgr_list = Element::list_signal(
+        ui.sites,
+        |s: &crate::core::store::SftpSite| s.id,
+        move |s: crate::core::store::SftpSite| {
+            let (sel, sites) = (mgr_list_ui.site_sel, mgr_list_ui.sites);
+            let form_ui = mgr_list_ui.clone();
+            let row_id = s.id;
+            Element::row()
+                .width_match()
+                .height(30)
+                .cross(Align::Center)
+                .spacing(8)
+                .padding_xy(8, 0)
+                .corner(4.0)
+                .clickable()
+                // 点行：同步下拉索引 + 整行字段回填右侧表单（单层内编辑）
+                .on_click(move |_| {
+                    let list = sites.get();
+                    if let Some(idx) = list.iter().position(|x| x.id == row_id) {
+                        sel.set(idx);
+                    }
+                    if let Some(x) = list.iter().find(|x| x.id == row_id) {
+                        form_ui.site_edit_id.set(x.id);
+                        form_ui.site_name.set(x.name.clone());
+                        form_ui.site_host.set(x.host.clone());
+                        form_ui.site_port.set(x.port.to_string());
+                        form_ui.site_user.set(x.user.clone());
+                        form_ui.site_pass.set(x.pass.clone());
+                    }
+                })
+                .child(
+                    Element::label(s.name.clone())
+                        .font_size(13.0)
+                        .fg_role(Role::Text)
+                        .weight(1.0)
+                        .max_lines(1)
+                        .truncate(Truncate::End),
+                )
+                .child(
+                    Element::label(format!("{}@{}", s.user, s.host))
+                        .font_size(11.0)
+                        .fg_role(Role::TextMuted)
+                        .max_lines(1)
+                        .truncate(Truncate::End),
+                )
+        },
+    );
+    // 双栏容器：左侧列表（可滚动），右侧表单（编辑/新建）+ 底部操作
+    let form_save = Element::button(lang::SFTP_SITE_SAVE()).small().on_click({
+        let (show, id, name, site_host, site_port, site_user, site_pass) = (
+            ui.site_edit_show,
+            ui.site_edit_id,
+            ui.site_name,
+            ui.site_host,
+            ui.site_port,
+            ui.site_user,
+            ui.site_pass,
         );
-
-        // 大小列（目录无大小）：右缘内收 12px，避开水印在内容之上的滚动条
-        if !self.entry.is_dir {
-            let ts_small = TextStyle { size: 12.0, ..ts };
-            canvas.draw_text(
-                &sftp::human_size(self.entry.size),
-                Rect::new(
-                    (x + w - SIZE_W - SIZE_RIGHT_PAD) as i32,
-                    bounds.y,
-                    SIZE_W as i32,
-                    bounds.h,
-                ),
-                p.text_muted,
-                Align::End,
-                &ts_small,
+        move |_| {
+            let n = name.get().trim().to_string();
+            if n.is_empty() {
+                return;
+            }
+            let site = crate::core::store::SftpSite {
+                id: id.get(),
+                name: n,
+                host: site_host.get().trim().to_string(),
+                port: site_port.get().trim().parse::<u16>().unwrap_or(22),
+                user: site_user.get().trim().to_string(),
+                pass: site_pass.get(),
+            };
+            if crate::core::store::sftp_upsert(&site).is_ok() {
+                sites.set(crate::core::store::sftp_list().unwrap_or_default());
+            }
+            show.set(false);
+        }
+    });
+    let form_del = Element::button(lang::SFTP_SITE_DEL())
+        .small()
+        .neutral()
+        .danger()
+        .on_click({
+            let (id, show) = (ui.site_edit_id, ui.site_edit_show);
+            move |_| {
+                let idv = id.get();
+                if idv > 0 && crate::core::store::sftp_del(idv).is_ok() {
+                    sites.set(crate::core::store::sftp_list().unwrap_or_default());
+                    // 删除后也不关窗，表单重置为新建态
+                    id.set(0);
+                    let _ = show;
+                }
+            }
+        });
+    let mgr_body = Element::row()
+        .width_match()
+        .height(300)
+        .spacing(12)
+        // 左栏：站点列表（新建等操作统一放弹窗底部按钮排）
+        .child(crate::widgets::mgr_list_col(
+            mgr_list,
+            sites.map(|s| s.is_empty()),
+        ))
+        // 右栏：表单卡片（点列表行回填；新建按钮清空）
+        .child(crate::widgets::mgr_form_col(
+            Element::col()
+                .width_match()
+                .height_match()
+                .spacing(8)
+                .child(
+                    Element::text_input(ui.site_name, strip(&lang::SFTP_SITE_NAME()))
+                        .autofocus()
+                        .width_match(),
+                )
+                .child(Element::text_input(ui.site_host, strip(&lang::SFTP_HOST())).width_match())
+                .child(
+                    Element::row()
+                        .spacing(8)
+                        .child(
+                            Element::text_input(ui.site_port, strip(&lang::SFTP_PORT())).width(80),
+                        )
+                        .child(
+                            Element::text_input(ui.site_user, strip(&lang::SFTP_USER()))
+                                .weight(1.0),
+                        ),
+                )
+                .child(
+                    Element::text_input(ui.site_pass, strip(&lang::SFTP_PASS()))
+                        .password()
+                        .width_match(),
+                )
+                .child(Element::flex_spacer()),
+        ));
+    // 底部按钮排：新建（清空表单）/ 删除（编辑态可用）/ 保存 / 确定
+    let mgr_new = Element::button(lang::SFTP_SITE_NEW())
+        .small()
+        .neutral()
+        .on_click({
+            let (id, name, site_host, site_port, site_user, site_pass) = (
+                ui.site_edit_id,
+                ui.site_name,
+                ui.site_host,
+                ui.site_port,
+                ui.site_user,
+                ui.site_pass,
             );
-        }
-    }
+            move |_| {
+                id.set(0);
+                // 新建态默认填示例数据，可直接改后保存
+                name.set("示例站点".to_string());
+                site_host.set("127.0.0.1".to_string());
+                site_port.set("22".to_string());
+                site_user.set("root".to_string());
+                site_pass.set(String::new());
+            }
+        });
+    let site_mgr_dialog = crate::widgets::mgr_dialog(
+        ui.site_mgr_show,
+        lang::SFTP_SITE_TITLE(),
+        620,
+        move |_| mgr_close.set(false),
+        mgr_body,
+        mgr_new,
+        form_del,
+        form_save,
+    );
 
-    fn on_event(&mut self, ctx: &mut EventCtx, ev: &Event) -> bool {
-        match ev {
-            Event::Pointer(p) => match p.kind {
-                PointerKind::Enter => {
-                    self.hover.set(true);
-                    ctx.mark_dirty();
-                    false
-                }
-                PointerKind::Leave => {
-                    self.hover.set(false);
-                    ctx.mark_dirty();
-                    false
-                }
-                PointerKind::Down if p.button == MouseButton::Left => {
-                    let b = ctx.bounds();
-                    if !b.contains(p.pos) {
-                        return false;
-                    }
-                    let rel = (p.pos.x - b.x) as f32;
-                    if self.entry.is_dir {
-                        // 点行首勾选区（勾选标记可见时）= 选中/取消目录；
-                        // 不可见（未悬停）时点图标等同点行，进入目录。
-                        if rel < CHECK_HIT && (self.hover.get() || self.is_sel()) {
-                            self.toggle_select(ctx);
-                        } else {
-                            // 进入目录（15s 内命中缓存即秒开）
-                            let path = sftp::join_path(&self.cwd.get(), &self.entry.name);
-                            let _ = self.cmd.send(sftp::SftpCmd::List { path, force: false });
-                        }
-                    } else {
-                        // 文件：整行点击切换选中（再点一次取消）
-                        self.toggle_select(ctx);
-                    }
-                    true
-                }
-                _ => false,
-            },
-            _ => false,
-        }
-    }
+    // ── 页面：无标题，紧凑布局把空间让给文件区；弹窗由调用方挂根层级（遮罩铺满全窗）──
+    let page = Element::stack().fill().child(
+        Element::col()
+            .padding(12)
+            .spacing(8)
+            .child(conn_form)
+            .child(
+                Element::col()
+                    .weight(1.0)
+                    .spacing(8)
+                    .child(toolbar)
+                    .child(path_row)
+                    .child(list_area),
+            ),
+    );
+    let dialogs = Element::stack()
+        .fill()
+        .child(mkdir_dialog)
+        .child(delete_dialog)
+        .child(site_dialog)
+        .child(site_mgr_dialog);
 
-    fn cursor(&self) -> CursorShape {
-        CursorShape::Hand
-    }
+    // 弹窗统一由根层级挂载：ModalScrim 遮罩铺满根节点，模态覆盖整窗（含侧栏）
+    (page, dialogs)
 }

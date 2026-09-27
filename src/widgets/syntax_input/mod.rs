@@ -23,7 +23,6 @@ pub mod sql_lexer;
 pub mod test_harness;
 
 use std::cell::{Cell, RefCell};
-use std::collections::HashMap;
 
 use windui::core::{EventCtx, Widget};
 use windui::event::{CursorShape, Event, Key, KeyEvent, MouseButton, PointerKind};
@@ -35,25 +34,15 @@ use windui::style::Style;
 use windui::text::{TextEngine, TextStyle};
 use windui::ui::caret::{CaretOpts, CaretState};
 
-/// 词法分析器：将文本切分为带颜色类型的 token 列表。
-#[derive(Debug, Clone)]
-pub struct LexToken<'a> {
-    pub kind: TokenKind,
-    pub text: &'a str,
-}
+mod geometry;
+mod lex;
+#[cfg(test)]
+mod tests;
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum TokenKind {
-    Keyword,
-    String,
-    Number,
-    Comment,
-    Operator,
-    Flag,
-    Command,
-    Variable,
-    Plain,
-}
+use crate::widgets::sel_core::byte_at;
+pub(crate) use geometry::MeasureKey;
+use geometry::{b_left_offset, row_metrics, row_segs, Layout, Row, NO_WRAP_W, PAD};
+pub use lex::{lex_shell, lex_sql, lex_sql_dialect, LexerKind, TokenKind};
 
 /// 高亮主题色（解析自 windui 当前主题）。
 struct HighlightColors {
@@ -106,57 +95,6 @@ impl HighlightColors {
     }
 }
 
-/// SQL 词法分析 → LexToken 转换。
-pub fn lex_sql(text: &str) -> Vec<LexToken<'_>> {
-    sql_lexer::tokenize(text)
-        .into_iter()
-        .map(|t| LexToken {
-            kind: match t.kind {
-                sql_lexer::SqlTokenKind::Keyword => TokenKind::Keyword,
-                sql_lexer::SqlTokenKind::String => TokenKind::String,
-                sql_lexer::SqlTokenKind::Number => TokenKind::Number,
-                sql_lexer::SqlTokenKind::Comment => TokenKind::Comment,
-                sql_lexer::SqlTokenKind::Operator => TokenKind::Operator,
-                sql_lexer::SqlTokenKind::Identifier
-                | sql_lexer::SqlTokenKind::Paren
-                | sql_lexer::SqlTokenKind::Semicolon => TokenKind::Plain,
-                sql_lexer::SqlTokenKind::Whitespace
-                | sql_lexer::SqlTokenKind::Newline
-                | sql_lexer::SqlTokenKind::Unknown => TokenKind::Plain,
-            },
-            text: t.text,
-        })
-        .collect()
-}
-
-/// Shell 词法分析 → LexToken 转换。
-pub fn lex_shell(text: &str) -> Vec<LexToken<'_>> {
-    shell_lexer::tokenize(text)
-        .into_iter()
-        .map(|t| LexToken {
-            kind: match t.kind {
-                shell_lexer::ShellTokenKind::Command => TokenKind::Command,
-                shell_lexer::ShellTokenKind::Flag => TokenKind::Flag,
-                shell_lexer::ShellTokenKind::String => TokenKind::String,
-                shell_lexer::ShellTokenKind::Variable => TokenKind::Variable,
-                shell_lexer::ShellTokenKind::Operator => TokenKind::Operator,
-                shell_lexer::ShellTokenKind::Comment => TokenKind::Comment,
-                shell_lexer::ShellTokenKind::Argument => TokenKind::Plain,
-                shell_lexer::ShellTokenKind::Whitespace
-                | shell_lexer::ShellTokenKind::Newline => TokenKind::Plain,
-            },
-            text: t.text,
-        })
-        .collect()
-}
-
-/// 词法分析器类型。
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum LexerKind {
-    Sql,
-    Shell,
-}
-
 /// 逐行宽度缓存上限（条数）。超过即整体清空：长会话下旧行版本会随编辑不断
 /// 累积，按条数兜底防缓存无限膨胀（单条 ≈ 行字节 + 4×字符数 字节）。
 const WIDTH_CACHE_MAX_ENTRIES: usize = 8_192;
@@ -165,153 +103,6 @@ const WIDTH_CACHE_MAX_ENTRIES: usize = 8_192;
 /// 大文本"可堆到上百 MB，按字节兜底防内存膨胀。
 const UNDO_MAX_ENTRIES: usize = 200;
 const UNDO_MAX_BYTES: usize = 4 * 1024 * 1024;
-
-/// 排版度量指纹（逐行宽度缓存的有效性键）。
-///
-/// 字形 advance 只由 (字族, 字号, 字重, 斜体, DPI) 决定；行高与颜色不影响测宽。
-/// `TextStyle` 里的字族是对 style 的借用，缓存要跨帧存活，故落成 String。
-#[derive(Clone, Debug, PartialEq)]
-pub(crate) struct MeasureKey {
-    family: Option<String>,
-    size: f32,
-    weight: u16,
-    italic: bool,
-    scale: f32,
-}
-
-impl MeasureKey {
-    pub(crate) fn of(ts: &TextStyle<'_>, scale: f32) -> Self {
-        Self {
-            family: ts.family.map(str::to_owned),
-            size: ts.size,
-            weight: ts.weight,
-            italic: ts.italic,
-            scale,
-        }
-    }
-}
-
-// ───────────────────────────────────────────────────────────────────────────
-// 内部几何模型
-// ───────────────────────────────────────────────────────────────────────────
-
-/// 控件内容区四边留白（逻辑 px）。绘制与命中必须用同一份值，否则点、画错位。
-const PAD: i32 = 4;
-
-/// 一行的几何：`x` 为 **字符数 + 1** 项——前 `len` 项是第 0..len 个字符**左缘**
-/// 相对行首的偏移，末项是行尾右缘（最后一个插入点）。命中/光标/选区共用这张
-/// 表（对齐官方 TextInput VisLine.x 的 len+1 语义）。
-#[derive(Debug, Default)]
-struct Row {
-    /// 本行第一个字符在全文（含 `\n`）中的字符下标。
-    start: usize,
-    x: Vec<f32>,
-    /// 本行可见字符（不含 `\n`）。整行一次成型绘制用（对齐官方 TextInput 的
-    /// `chars[ln.start..ln.end]` 逐行 `draw_text`，避免逐字符排版+入批）。
-    text: String,
-    /// 字符列 → 行内字节偏移（**len+1** 项，与 x 一一对应，末项 = 行字节长）。
-    /// 按 token run 切段绘制必须按字节切 `text`：直接拿字符列当字节下标，
-    /// 一旦行内有中文等多字节字符就会切进字符中间而 panic。
-    bmap: Vec<u32>,
-    /// 本行内每个 token run（token 类型 + 起始列 + 结束列，列相对行首）：
-    /// 行级语法色缓存，paint 按 run 整段着色，不逐字符查表/排版。
-    runs: Vec<(TokenKind, usize, usize)>,
-}
-
-impl Row {
-    /// 本行最后一个字符之后的全文下标（= start + 字符数）。前缀 x 表下
-    /// x 含行尾右缘共 len+1 项，字符数 = x.len()-1。
-    fn end_full(&self) -> usize {
-        self.start + self.x.len().saturating_sub(1)
-    }
-}
-
-impl Row {
-    fn len(&self) -> usize {
-        self.x.len().saturating_sub(1)
-    }
-}
-
-/// 最近一次 paint/measure 建立的布局缓存。
-struct Layout {
-    rows: Vec<Row>,
-    /// 行高（逻辑 px）。
-    line_h: f32,
-    /// 字号（逻辑 px）。
-    font: f32,
-    /// 文本总字符数（含换行符）。
-    total: usize,
-    /// 建立本布局时的文本（缓存键：文本变化即失效）。
-    text: String,
-    /// 建立本布局时的 DPI 缩放（跨分辨率拖动窗口后字号取整会变，需重建）。
-    scale: f32,
-    /// 布局是否可用。`Layout::empty()` 初始为 false：事件早于首次 paint
-    /// 到达时不应用空布局做命中/几何换算（会把光标跳到开头）。
-    valid: bool,
-    /// 建立本布局时的词法器（缓存键：换词法器颜色语义变，需重建 run 缓存）。
-    lexer: LexerKind,
-    /// 建立本布局时的行内色板（主题色）。缓存键：运行期换主题后需重建。
-    palette: Vec<Color>,
-    /// 逐行前缀宽度缓存（键 = 逻辑行内容）。前缀整串测量是 O(行长²) 字符工作，
-    /// 长文档每次编辑全量重测是主要卡顿源；逐键编辑只改一行，其余行直接命中。
-    widths: HashMap<String, Vec<f32>>,
-    /// 宽度缓存建立时的度量指纹：字族/字号/字重/斜体/DPI 任一变化即整体作废。
-    wkey: Option<MeasureKey>,
-}
-
-impl Layout {
-    fn empty() -> Self {
-        Layout {
-            rows: vec![Row {
-                start: 0,
-                x: vec![0.0],
-                text: String::new(),
-                bmap: vec![0],
-                runs: Vec::new(),
-            }],
-            line_h: 18.2,
-            font: 14.0,
-            total: 0,
-            text: String::new(),
-            scale: 1.0,
-            valid: false,
-            lexer: LexerKind::Sql,
-            palette: Vec::new(),
-            widths: HashMap::new(),
-            wkey: None,
-        }
-    }
-
-    fn rows_valid(&self) -> bool {
-        self.valid && !self.rows.is_empty()
-    }
-
-    /// 全文字符下标 → (所在行, 行内列)。列按该行长度钳制，保证 `x` 索引安全
-    /// （游标可能停在文末空行 / 行尾新行符处）。
-    ///
-    /// 行首下标严格递增，二分定位（原为 O(行数) 全扫，长文档每帧多处调用）。
-    fn line_of(&self, gi: usize) -> (usize, usize) {
-        let gi = gi.min(self.total);
-        let row = self.rows.partition_point(|r| r.start <= gi).saturating_sub(1);
-        let col = gi.saturating_sub(self.rows[row].start).min(self.rows[row].len());
-        (row, col)
-    }
-
-    /// 某行的内容字符区间在全文中的下标端点 [start, end)。
-    /// `end` 是该行最后一字符之后、即行尾插入点（无换行时亦为文末）。
-    fn row_span(&self, row: usize) -> (usize, usize) {
-        // 只接受在界内的 row；越界回落到（空）末行而非 panicking 的 last().unwrap()。
-        let n = self.rows.len();
-        match self.rows.get(row.min(n.saturating_sub(1))) {
-            Some(r) => (r.start, r.start + r.len()),
-            None => (self.total, self.total),
-        }
-    }
-
-    fn row_len(&self, row: usize) -> usize {
-        self.rows.get(row).map(Row::len).unwrap_or(0)
-    }
-}
 
 // ───────────────────────────────────────────────────────────────────────────
 // 控件
@@ -397,16 +188,7 @@ impl SyntaxInput {
     /// 规范化选区 [start, end)。无选区返回 None。
     fn selection(&self) -> Option<(usize, usize)> {
         let total = self.char_count();
-        let c = self.cursor.get().min(total);
-        let a = self.anchor.get()?;
-        let a = a.min(total);
-        if a == c {
-            None
-        } else if a < c {
-            Some((a, c))
-        } else {
-            Some((c, a))
-        }
+        crate::widgets::sel_core::normalize_selection(self.cursor.get(), self.anchor.get(), total)
     }
 
     /// 光标/锚点钳制到合法字符下标 [0, 文本长度]（文本被外部改写后可能悬空/越界）。
@@ -499,6 +281,8 @@ impl SyntaxInput {
         // 吞进 span 时，run 末列按行长钳制——注释在行内可见，'\n' 本身不入行。
         let tokens = match self.lexer {
             LexerKind::Sql => lex_sql(&text),
+            LexerKind::SqlMySql => lex_sql_dialect(&text, sql_lexer::Dialect::MySql),
+            LexerKind::SqlPg => lex_sql_dialect(&text, sql_lexer::Dialect::Postgres),
             LexerKind::Shell => lex_shell(&text),
         };
         let mut col = 0usize;
@@ -553,41 +337,11 @@ impl SyntaxInput {
         // 内容坐标（相对"bounds 左上 + PAD"的原点，未滚动）。
         let cx = px - (b.x as f32 + PAD as f32) + self.scroll_x.get();
         let cy = py - (b.y as f32 + PAD as f32) + self.scroll_y.get();
-        let line_h = lay.line_h.max(1.0);
-        let row_floor = (cy / line_h).floor();
-        let row = if row_floor < 0.0 {
-            0
-        } else {
-            (row_floor as usize).min(lay.rows.len().saturating_sub(1))
-        };
+        let row = crate::widgets::sel_core::row_at_y(cy, lay.line_h, lay.rows.len());
         let r = &lay.rows[row];
-        let len = r.len();
         // x 单调不减：二分定位 cx 所在列（原为 O(len) 全扫，长行逐帧拖选会卡）。
-        // 语义与逐格比较一致：取使"左缘 ≤ cx"成立的最大列；cx 在某字符中部时
-        // 落在左半偏左、右半偏右。
-        let col = if cx <= r.x[0] {
-            0
-        } else if cx >= *r.x.last().unwrap_or(&0.0) {
-            len
-        } else {
-            let mut lo = 0usize;
-            let mut hi = len;
-            while lo + 1 < hi {
-                let mid = lo + (hi - lo) / 2;
-                if r.x[mid] <= cx {
-                    lo = mid;
-                } else {
-                    hi = mid;
-                }
-            }
-            // x 为 f32：当 cx 恰好落在某字符中部（与 lo/hi 中点同距）时，
-            // 按半开区间 [x[lo], x[hi]) 归属——中点之前算 lo、之后算 hi。
-            if cx <= (r.x[lo] + r.x[hi]) / 2.0 {
-                lo
-            } else {
-                hi
-            }
-        };
+        // cx 在某字符中部时按半开区间归属——中点之前算左、之后算右。
+        let col = crate::widgets::sel_core::col_at_x(&r.x, cx);
         (r.start + col).min(lay.total)
     }
 
@@ -730,33 +484,13 @@ impl SyntaxInput {
         self.goal_col.set(None);
     }
 
-    /// 选中下标 gi 处"词"的区间（用于双击）。简单实现：向两侧扫到空白/标点界。
+    /// 选中下标 gi 处"词"的区间（用于双击）：词 = 字母数字/下划线/非标点非空白，
+    /// 向两侧扫到边界；命中分隔符只选该字符。
     fn word_around(&self, gi: usize) -> (usize, usize) {
         let chars: Vec<char> = self.text_clone().chars().collect();
-        let total = chars.len();
-        if total == 0 {
-            return (0, 0);
-        }
-        let is_w = |c: &char| c.is_alphanumeric() || *c == '_' || !c.is_whitespace() && !c.is_ascii_punctuation();
-        // 双击命中的字符若本身是分隔符，则不扩展。
-        let mut gi = gi.min(total.saturating_sub(1));
-        while gi > 0 && chars[gi] == '\n' {
-            gi -= 1;
-        }
-        if total == 0 || !is_w(&chars[gi]) {
-            // 命中空白/分隔符：选中该字符本身即可（避免跳到别处）。
-            let e = (gi + 1).min(total);
-            return (gi, e);
-        }
-        let mut s = gi;
-        while s > 0 && is_w(&chars[s - 1]) {
-            s -= 1;
-        }
-        let mut e = gi + 1;
-        while e < total && is_w(&chars[e]) {
-            e += 1;
-        }
-        (s, e)
+        crate::widgets::sel_core::word_around(&chars, gi, |c| {
+            c.is_alphanumeric() || c == '_' || (!c.is_whitespace() && !c.is_ascii_punctuation())
+        })
     }
 
     /// 选中光标行整段（三击）。
@@ -947,92 +681,7 @@ impl SyntaxInput {
         }
         self.scroll_y.set(sy.clamp(0.0, max_sy));
     }
-
 }
-
-// 自由辅助：byte offset of char index。
-fn byte_at(s: &str, gi: usize) -> usize {
-    s.char_indices()
-        .nth(gi)
-        .map(|(b, _)| b)
-        .unwrap_or(s.len())
-}
-
-/// 一行的 (前缀 x 表, 字节偏移表)。宽度优先命中逐行缓存；未命中才逐前缀
-/// 整串测量（O(行长²) 字符工作量），测完回填缓存。
-///
-/// 前缀整串测量（而非逐字符独立测量再累加）：绘制是整串一次 DWrite 排版
-/// （真实 advance），逐字符测量会把每字符的取整误差随列数线性放大，行尾右缘
-/// 系统性偏右，光标/选区漂到文字右缘之外。与绘制同源后严格对齐。
-fn row_metrics(
-    line: &str,
-    font: f32,
-    measure: &mut impl FnMut(&str) -> f32,
-    widths: &mut HashMap<String, Vec<f32>>,
-) -> (Vec<f32>, Vec<u32>) {
-    let lc = line.chars().count();
-    // 字符列 → 字节偏移表（与绘制切片共用，len+1 项）。
-    let mut bmap: Vec<u32> = line.char_indices().map(|(b, _)| b as u32).collect();
-    bmap.push(line.len() as u32);
-    if lc == 0 {
-        return (vec![0.0], bmap);
-    }
-    let x = match widths.get(line) {
-        Some(cached) => cached.clone(),
-        None => {
-            let mut x = Vec::with_capacity(lc + 1);
-            x.push(0.0);
-            let mut acc = String::with_capacity(line.len());
-            for ch in line.chars() {
-                acc.push(ch);
-                let w = measure(&acc).max(0.0);
-                x.push(if w.is_finite() { w } else { font * acc.chars().count() as f32 });
-            }
-            widths.insert(line.to_owned(), x.clone());
-            x
-        }
-    };
-    (x, bmap)
-}
-
-/// 把一行的 token run 合并成绘制段（字符列区间，空隙补 Plain、相邻同色合并），
-/// 与旧 paint 内联逻辑一致；提成自由函数让"切出来的段字节安全"可被单测覆盖。
-fn row_segs(r: &Row) -> Vec<(usize, usize, TokenKind)> {
-    let mut segs: Vec<(usize, usize, TokenKind)> = Vec::new();
-    let mut pos = 0usize;
-    for (kind, c1, c2) in &r.runs {
-        if *c2 <= *c1 || *c2 > r.len() {
-            continue;
-        }
-        if *c1 > pos {
-            match segs.last_mut() {
-                Some(s) if s.2 == TokenKind::Plain && s.1 == pos => s.1 = *c1,
-                _ => segs.push((pos, *c1, TokenKind::Plain)),
-            }
-        }
-        match segs.last_mut() {
-            Some(s) if s.2 == *kind && s.1 == *c1 => s.1 = *c2,
-            _ => segs.push((*c1, *c2, *kind)),
-        }
-        pos = (*c2).min(r.len());
-    }
-    if pos < r.len() {
-        match segs.last_mut() {
-            Some(s) if s.2 == TokenKind::Plain && s.1 == pos => s.1 = r.len(),
-            _ => segs.push((pos, r.len(), TokenKind::Plain)),
-        }
-    }
-    segs
-}
-
-// 行内 x 偏移的基点（相对 bounds 左缘的 PAD）。
-fn b_left_offset() -> f32 {
-    PAD as f32
-}
-
-/// 逐行绘制文字时喂给排版引擎的"不换行宽"：显示行已是逻辑行，给个超宽盒子
-/// 防止引擎二次折行（对齐官方 TextInput 多行绘制约定 `NO_WRAP_W = 100_000`）。
-const NO_WRAP_W: i32 = 100_000;
 
 // ───────────────────────────────────────────────────────────────────────────
 // Widget
@@ -1051,11 +700,10 @@ impl Widget for SyntaxInput {
         let rows = lay.rows.len() as f32;
         let intrinsic = (rows * lay.line_h) as i32 + 2 * PAD;
         let min = lay.line_h as i32 + 2 * PAD;
-        let h = if avail.h > 0 {
-            intrinsic.clamp(min, avail.h)
-        } else {
-            intrinsic.max(min)
-        };
+        // 视口模型：父级给了真实高度就填满分配区（不随内容缩——否则单行短内容时控件
+        // 只是一小条，点下方空白落不到控件上、无法聚焦）；无约束（含 windui 哨兵值
+        // i32::MAX/4）时回退固有高度。哨兵判定统一走 layout_hint::viewport_height。
+        let h = crate::widgets::layout_hint::viewport_height(avail.h, intrinsic, min);
         Size::new(avail.w, h)
     }
 
@@ -1075,9 +723,14 @@ impl Widget for SyntaxInput {
         // 每帧用真实字号/画布测量重建布局 → 命中/绘制同源，且文本改动即刷新。
         // 未变则 rebuild 内部直接命中缓存跳过（DPI 取自 canvas，与 measure 同源）。
         let palette = colors.as_palette();
-        self.rebuild(font, line_h, canvas.dpi_scale(), &ts, &palette, |p: &str| {
-            canvas.measure_text(p, &ts).w.max(0) as f32
-        });
+        self.rebuild(
+            font,
+            line_h,
+            canvas.dpi_scale(),
+            &ts,
+            &palette,
+            |p: &str| canvas.measure_text(p, &ts).w.max(0) as f32,
+        );
 
         // 背景 + 焦点描边（按整块 bounds 自绘，与命中坐标一致）。
         let bg = colors.placeholder_bg();
@@ -1172,7 +825,13 @@ impl Widget for SyntaxInput {
                         let x1 = b_left_offset() + r.x[c1] - scroll_x;
                         let x2 = b_left_offset() + r.x[c2] - scroll_x;
                         let rx = bounds.x as f32 + x1;
-                        canvas.fill_rect(rx, ry, (x2 - x1).max(1.0), lay.line_h, &Paint::fill(sel_c));
+                        canvas.fill_rect(
+                            rx,
+                            ry,
+                            (x2 - x1).max(1.0),
+                            lay.line_h,
+                            &Paint::fill(sel_c),
+                        );
                     }
                 }
             }
@@ -1236,7 +895,11 @@ impl Widget for SyntaxInput {
                     &opts,
                 );
                 // 记录光标节点局部坐标，供输入法定位候选窗。
-                self.caret_local.set(Some((cx as i32, (cy - bounds.y as f32) as i32, lay.line_h as i32)));
+                self.caret_local.set(Some((
+                    cx as i32,
+                    (cy - bounds.y as f32) as i32,
+                    lay.line_h as i32,
+                )));
             } else {
                 self.caret_local.set(None);
             }
@@ -1410,7 +1073,7 @@ impl SyntaxInput {
         }
         // 任何编辑/导航键都应把视口拉回光标。
         self.follow.set(true);
-        
+
         // 文档已改则本帧末由 repaint 重建布局，无需在此计算几何。
         match k.key {
             // 可打印字符（含空格经 WM_CHAR 送达）。回车在 win32 是 Key::Enter 而非 Char。
@@ -1526,11 +1189,9 @@ impl SyntaxInput {
     }
 
     fn selected_str(&self) -> Option<String> {
-        let (s, e) = self.selection()?;
-        self.text.with(|t| {
-            let (bs, be) = (byte_at(t, s), byte_at(t, e));
-            Some(t[bs..be].to_string())
-        })
+        let sel = self.selection()?;
+        self.text
+            .with(|t| crate::widgets::sel_core::selected_str(t, Some(sel)))
     }
 
     /// 拖选时指针越过上下边界，按越界距离滚动（每次至多一行）。
@@ -1566,309 +1227,5 @@ impl HighlightColors {
         // 编辑器底色：取主题 surface 语义色。
         let t = windui::theme::current();
         t.palette.surface
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use windui::geometry::Rect;
-    use windui::signal::signal;
-
-    /// 构造一个已建立布局的控件（常量字符宽 10，便于断言 hit_index）。
-    fn build(text: &str) -> SyntaxInput {
-        let s = signal(text.to_string());
-        let si = SyntaxInput::new(s, "", LexerKind::Sql);
-        si.rebuild(
-            14.0,
-            19.6,
-            1.0,
-            &TextStyle::new(14.0),
-            &HighlightColors::from_theme().as_palette(),
-            // 前缀测量语义：宽 = 字符数 × 10（等价于常量字符宽 10 的累加）。
-            |p| (p.chars().count() as f32) * 10.0,
-        );
-        si
-    }
-
-    #[test]
-    fn byte_at_cjk() {
-        // 你 = 3 字节；a/b/c 各 1 字节。
-        assert_eq!(byte_at("你abc", 0), 0);
-        assert_eq!(byte_at("你abc", 1), 3);
-        assert_eq!(byte_at("你abc", 2), 4);
-        assert_eq!(byte_at("你abc", 3), 5);
-        // 越界钳到文末。
-        assert_eq!(byte_at("你abc", 99), 6);
-    }
-
-    #[test]
-    fn layout_line_of_multiline() {
-        let si = build("ab\ncd\n");
-        let lay = si.layout.borrow();
-        assert_eq!(lay.line_of(0), (0, 0));
-        assert_eq!(lay.line_of(1), (0, 1));
-        assert_eq!(lay.line_of(2), (0, 2), "行尾换行符前 = 第 0 行末");
-        assert_eq!(lay.line_of(3), (1, 0));
-        assert_eq!(lay.line_of(4), (1, 1));
-        assert_eq!(lay.line_of(6), (2, 0), "文末空行");
-        // 越界下标钳制而非 panic。
-        assert_eq!(lay.line_of(999), (2, 0));
-    }
-
-    #[test]
-    fn layout_row_span_clamps_oob() {
-        let si = build("ab\ncd\n");
-        let lay = si.layout.borrow();
-        // 越界 row 回落到 (total, total)，不再 last().unwrap() panic。
-        assert_eq!(lay.row_span(99), (6, 6));
-        assert_eq!(lay.row_span(0), (0, 2));
-        assert_eq!(lay.row_len(99), 0);
-    }
-
-    #[test]
-    fn hit_index_columns() {
-        let si = build("hello"); // 单行，x = [0,10,20,30,40,50]
-        let b = Rect::new(0, 0, 200, 60);
-        let row_y = 10.0; // 落在第 0 行
-        assert_eq!(si.hit_index(b, 4.0, row_y), 0, "行首");
-        assert_eq!(si.hit_index(b, 19.0, row_y), 1, "第 1 字符中部偏右");
-        assert_eq!(si.hit_index(b, 24.0, row_y), 2, "第 2 字符左半");
-        assert_eq!(si.hit_index(b, 54.0, row_y), 5, "行尾插入点");
-    }
-
-    #[test]
-    fn hit_index_invalid_layout_returns_cursor() {
-        // 未 rebuild（布局未建立）：命中不 panic，返回钳制后的光标。
-        let si = SyntaxInput::new(signal(String::from("abcd")), "", LexerKind::Sql);
-        let b = Rect::new(0, 0, 200, 60);
-        assert_eq!(si.hit_index(b, 4.0, 10.0), 4);
-    }
-
-    #[test]
-    fn selection_normalizes_order() {
-        let si = build("abcdef");
-        // 锚在右、光标在左 → 规范化为升序。
-        si.cursor.set(1);
-        si.anchor.set(Some(4));
-        assert_eq!(si.selection(), Some((1, 4)));
-        // 重合 → 无选区。
-        si.cursor.set(2);
-        si.anchor.set(Some(2));
-        assert_eq!(si.selection(), None);
-        // 锚点越界被钳到文末。
-        si.cursor.set(0);
-        si.anchor.set(Some(99));
-        assert_eq!(si.selection(), Some((0, 6)));
-    }
-
-    #[test]
-    fn clamp_cursor_on_external_shrink() {
-        let si = build("hello");
-        si.cursor.set(5);
-        si.anchor.set(Some(5));
-        // 外部把文本改短（不经过控件事件）。
-        si.text.set(String::from("hi"));
-        assert!(si.clamp_cursor(), "越界光标应被修正");
-        assert_eq!(si.cursor.get(), 2);
-        assert_eq!(si.anchor.get(), None, "与光标重合的锚点应清除");
-        // 再次调用幂等。
-        assert!(!si.clamp_cursor());
-    }
-
-    #[test]
-    fn type_char_cjk_keeps_char_cursor() {
-        let si = build("ab");
-        si.cursor.set(1);
-        si.type_char('你');
-        assert_eq!(si.text.with(|t| t.clone()), "a你b");
-        assert_eq!(si.cursor.get(), 2, "光标按字符下标前进");
-    }
-
-    #[test]
-    fn backspace_cjk() {
-        let si = build("a你");
-        si.cursor.set(2);
-        si.backspace();
-        assert_eq!(si.text.with(|t| t.clone()), "a");
-        assert_eq!(si.cursor.get(), 1);
-    }
-
-    #[test]
-    fn delete_forward_at_end_noop() {
-        let si = build("ab");
-        si.cursor.set(2);
-        si.delete_forward(); // 已在文末，应无变化
-        assert_eq!(si.text.with(|t| t.clone()), "ab");
-        assert_eq!(si.cursor.get(), 2);
-    }
-
-    #[test]
-    fn paste_crlf_normalized() {
-        let si = build("");
-        si.cursor.set(0);
-        si.paste("a\r\nb\rc");
-        assert_eq!(si.text.with(|t| t.clone()), "a\nb\nc", "CRLF/CR 统一为 LF");
-        assert_eq!(si.cursor.get(), 5);
-        // 全 CR 的纯空白剪贴内容 → 不产生空粘贴。
-        let si2 = build("");
-        si2.paste("\r\r");
-        assert_eq!(si2.text.with(|t| t.clone()), "\n\n");
-    }
-
-    #[test]
-    fn word_around() {
-        let si = build("hello world");
-        assert_eq!(si.word_around(7), (6, 11), "选中 world");
-        assert_eq!(si.word_around(2), (0, 5), "选中 hello");
-        // 空文本不 panic。
-        let empty = build("");
-        assert_eq!(empty.word_around(0), (0, 0));
-    }
-
-    #[test]
-    fn move_vertical_invalid_layout_no_panic() {
-        let si = SyntaxInput::new(signal(String::from("ab")), "", LexerKind::Sql);
-        si.cursor.set(1);
-        si.move_vertical(true, false); // 布局未建立，静默返回
-        si.move_home(false);
-        si.move_end(false);
-        assert_eq!(si.cursor.get(), 1, "未建立布局时导航不改动光标");
-    }
-
-    #[test]
-    fn undo_redo_roundtrip() {
-        let si = build("ab");
-        si.cursor.set(2);
-        si.type_char('c');
-        assert_eq!(si.text.with(|t| t.clone()), "abc");
-        si.undo();
-        assert_eq!(si.text.with(|t| t.clone()), "ab");
-        si.redo();
-        assert_eq!(si.text.with(|t| t.clone()), "abc");
-    }
-
-    #[test]
-    fn select_line_triple_click() {
-        let si = build("ab\ncd\n");
-        si.cursor.set(3); // 第 1 行（"cd"）行首
-        si.select_line();
-        assert_eq!(si.selection(), Some((3, 5)), "整行选中，不含换行");
-    }
-
-    #[test]
-    fn apply_edit_replaces_multibyte_range() {
-        let si = build("你abc");
-        // 删除字符 [1,3) = "ab"，插入 "X"。
-        si.apply_edit(1, 3, "X", 1);
-        assert_eq!(si.text.with(|t| t.clone()), "你Xc");
-    }
-
-    #[test]
-    fn select_all_bounds() {
-        let si = build("abcd");
-        si.select_all();
-        assert_eq!(si.selection(), Some((0, 4)));
-    }
-
-    #[test]
-    fn rebuild_cache_skips_when_unchanged() {
-        let si = build("hello");
-        let before: Vec<(usize, usize)> = si
-            .layout
-            .borrow()
-            .rows
-            .iter()
-            .map(|r| (r.start, r.x.len()))
-            .collect();
-        // 同参数再次 rebuild → 命中缓存，rows 不变。
-        si.rebuild(
-            14.0,
-            19.6,
-            1.0,
-            &TextStyle::new(14.0),
-            &HighlightColors::from_theme().as_palette(),
-            |p| (p.chars().count() as f32) * 10.0,
-        );
-        let after: Vec<(usize, usize)> = si
-            .layout
-            .borrow()
-            .rows
-            .iter()
-            .map(|r| (r.start, r.x.len()))
-            .collect();
-        assert_eq!(before, after);
-        // DPI 变化 → 强制重建。
-        si.rebuild(14.0, 19.6, 2.0, &TextStyle::new(14.0), &HighlightColors::from_theme().as_palette(), |_| 20.0);
-        let x0 = si.layout.borrow().rows[0].x[1];
-        assert_eq!(x0, 20.0, "重建后按新测宽");
-    }
-
-    /// 逐行宽度缓存：文本未变的行在强制重建（如换色板）时不再逐前缀测量。
-    #[test]
-    fn prefix_cache_hits_on_forced_rebuild() {
-        let si = build("ab\ncd");
-        let mut calls = 0;
-        // 换色板强制走重建路径，但两行内容未变 → 全部命中缓存，measure 零调用。
-        si.rebuild(
-            14.0,
-            19.6,
-            1.0,
-            &TextStyle::new(14.0),
-            &[windui::geometry::Color::rgb(1, 2, 3); 9],
-            |p| {
-                calls += 1;
-                (p.chars().count() as f32) * 10.0
-            },
-        );
-        assert_eq!(calls, 0, "未变的行应命中宽度缓存");
-        let lay = si.layout.borrow();
-        assert_eq!(lay.rows[0].x, vec![0.0, 10.0, 20.0]);
-    }
-
-    /// 回归：行内有中文时，按 token run 切段必须经 bmap 按字节切——字符列直当
-    /// 字节下标会切进多字节字符中间而 panic（旧实现），且段拼接须零丢失零重复。
-    #[test]
-    fn runs_on_cjk_slice_safely() {
-        let si = build("SELECT '中文' AS x -- 注释\nGO");
-        let lay = si.layout.borrow();
-        let mut painted = String::new();
-        for r in &lay.rows {
-            assert_eq!(r.bmap.len(), r.x.len(), "bmap 与 x 同为 len+1 项");
-            for (c1, c2, _) in row_segs(r) {
-                let (b1, b2) = (r.bmap[c1] as usize, r.bmap[c2] as usize);
-                painted.push_str(&r.text[b1..b2]);
-            }
-        }
-        // 各段首尾相接覆盖整行（不含换行）。
-        assert_eq!(painted, "SELECT '中文' AS x -- 注释GO");
-    }
-
-    /// 单行注释 token 吞进行尾 '\n' 时，run 末列按行长钳制：注释本身仍高亮，
-    /// 不再因超出行长被整段丢弃（旧实现后继行之前的注释永远不高亮）。
-    #[test]
-    fn line_comment_before_more_lines_is_highlighted() {
-        let si = build("SELECT 1 -- x\nSELECT 2");
-        let lay = si.layout.borrow();
-        let runs = &lay.rows[0].runs;
-        assert!(
-            runs.iter().any(|(k, c1, c2)| *k == TokenKind::Comment && *c1 == 9 && *c2 == 13),
-            "注释 run 应钳到行内 [9, 13)，实际 {:?}",
-            runs
-        );
-    }
-
-    /// 撤销栈字节上限：反复入栈大快照时按字节淘汰最旧条目，防内存膨胀。
-    #[test]
-    fn undo_stack_bounded_by_bytes() {
-        let si = build("");
-        si.text.set("x".repeat(200_000));
-        for _ in 0..40 {
-            si.push_undo(); // 每条快照 200KB，40 条共 8MB > 4MB 上限
-        }
-        let u = si.undo_stack.borrow();
-        assert!(u.len() < 40, "应按字节淘汰最旧快照");
-        let total: usize = u.iter().map(|(t, _)| t.len()).sum();
-        assert!(total <= UNDO_MAX_BYTES, "快照总字节应不超过上限");
     }
 }

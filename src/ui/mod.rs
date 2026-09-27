@@ -12,37 +12,113 @@
 //! - [`crate::ui::sftp`]：SFTP 页
 //! - [`crate::ui::table`]：表格列表 / 数据表格渲染
 //! - [`crate::ui::sql`]：SQL 查询面板
-//! - [`crate::ui::widgets`]：共享组件（card / nav_item / theme_toggle / about）
+//! - [`crate::ui::nav`]：侧栏导航与关于页
+//! - [`crate::widgets`]：扩展基础组件（card / 输入弹窗 / 站点管理 / 文件选择等）
 
 use windui::prelude::*;
 
 use crate::core;
 use crate::lang;
+use layout::build_ui;
+use shell::{app_icon, set_window_title, system_light_theme};
 
+mod db_page;
 mod icons;
+mod layout;
+pub(crate) mod master;
+mod mysql;
+/// 侧栏导航项 / 主题按钮 / 关于页（原 widgets 中导航相关部分）。
+mod nav;
 mod password;
+mod pg;
 mod remote;
-mod select_text;
+mod s3;
 mod sftp;
-mod ssh_cmd;
+mod sftp_row;
+mod shell;
 mod sql;
+mod ssh_cmd;
 mod table;
+mod theme;
 mod totp;
 mod turso;
-mod widgets;
-pub(crate) mod syntax_input;
 
-pub(crate) use widgets::{card, input_dialog, select_text};
+pub(crate) use crate::widgets::{card, input_dialog, select_text};
+#[allow(unused_imports)]
+pub(crate) use nav::nav_item;
+
+/// 更新检查状态（关于页展示；启动后台检查与手动检查共用）。
+#[derive(Clone, PartialEq)]
+pub(crate) enum UpdateStatus {
+    /// 未检测（启动后台检查还没回结果，或确认无新版）
+    Idle,
+    /// 检查中（手动点击后、后台线程未返回）
+    Checking,
+    /// 发现有新版（携带最新版本号）
+    New(String),
+    /// 已是最新版本
+    UpToDate,
+    /// 检查失败（网络等，静默提示可重试）
+    Failed,
+}
+
+/// 更新检查状态信号：全局只建一次（thread_local 槽位永生）。
+/// 自愈：thread_local 首建若发生在整树重建的 SignalScope 内会被收走，
+/// is_alive=false 时换新槽位重建，避免残留死句柄（读取即 panic）。
+pub(crate) fn update_status() -> Signal<UpdateStatus> {
+    APP_UPDATE_STATUS.with(|v| {
+        let mut v = v.borrow_mut();
+        if !v.is_alive() {
+            *v = signal(UpdateStatus::Idle);
+        }
+        v.clone()
+    })
+}
+
+thread_local! {
+    static APP_UPDATE_STATUS: std::cell::RefCell<Signal<UpdateStatus>> =
+        std::cell::RefCell::new(signal(UpdateStatus::Idle));
+    /// 更新检查通道发送端：run() 注册 channel 后存入，手动「检查更新」按钮借用。
+    static UPDATE_TX: std::cell::RefCell<Option<Sender<UpdateMsg>>> =
+        std::cell::RefCell::new(None);
+}
+
+/// 更新检查通道消息（后台线程 → UI 线程；Signal 非 Send，不能跨线程直接 set）。
+pub(crate) enum UpdateMsg {
+    New(String),
+    Latest,
+    Failed,
+}
+
+/// 发起一次更新检查：阻塞请求在后台线程执行，结果经通道回 UI 线程写状态信号。
+/// 启动时的自动检查也走这里（run() 注册 channel 后调用）。
+pub(crate) fn spawn_update_check() {
+    UPDATE_TX.with(|v| {
+        if let Some(tx) = v.borrow().as_ref() {
+            let tx = tx.clone();
+            std::thread::spawn(move || {
+                let msg = match core::update::check_latest() {
+                    Ok(latest) if core::update::is_newer(&latest, env!("CARGO_PKG_VERSION")) => {
+                        UpdateMsg::New(latest)
+                    }
+                    Ok(_) => UpdateMsg::Latest,
+                    Err(_) => UpdateMsg::Failed,
+                };
+                let _ = tx.send(msg);
+            });
+        }
+    });
+}
 
 /// 全部页面状态 + 全局状态（在 `run()` 中一次性创建；主题切换整树重建不丢状态）。
 /// 新增页面只需在此挂一个状态 struct，页面自己的信号/消息处理都在对应文件里。
 #[derive(Clone)]
 struct AppState {
-    /// 当前导航页（模块 id：0=TOTP 1=密码 2=Turso 3=SFTP 4=远程 5=关于；
+    /// 当前导航页（模块 id：0=TOTP 1=密码 2=Turso 3=SFTP 4=远程 5=关于 6=S3 7=MySQL 8=PG；
     /// 内容页按 id 显隐，与侧栏显示顺序解耦）
     tab: Signal<usize>,
     /// 侧栏菜单顺序：模块 id 序列（拖拽可调，持久化到 AppData，启动回填）。
-    /// 默认 SFTP/SSH、Turso 置顶（高频功能优先），其余按原相对顺序跟随。
+    /// 默认 SFTP/SSH、Turso 置顶，S3 第三行（高频功能优先），其余按原相对顺序跟随。
     nav_order: Signal<Vec<usize>>,
     /// 左侧菜单显示/隐藏（折叠手柄切换，持久化到 AppData）
     sidebar_visible: Signal<bool>,
@@ -51,39 +127,55 @@ struct AppState {
     /// 主题切换时整树重建：图标染色等「构建期定色」随当前主题重新解析
     /// （Role 底色/文字色由框架每帧跟随主题，无需重建）
     theme_epoch: Signal<Vec<()>>,
+    /// 窗体标题「APP_NAME - 模块名」：0.19 起 `App::title` 收 `TextContent`，
+    /// 绑 `Signal<String>` 后切页/切语言 set 即跟随，无需平台原生 hack
+    window_title: Signal<String>,
     totp: totp::TotpUi,
     password: password::PasswordUi,
     turso: turso::TursoUi,
+    mysql: mysql::MySqlUi,
+    pg: pg::PgUi,
     sftp: sftp::SftpUi,
+    s3: s3::S3Ui,
     remote: remote::RemoteUi,
+    /// 主口令门控（首次设置 / 换环境解锁弹窗）
+    master_gate: master::MasterGate,
 }
 
 impl AppState {
     fn new() -> Self {
+        // ── 主口令门控：必须最先执行（settings::load 解密敏感记忆项依赖已解锁）──
+        // 首次启动强制设置；换机/恢复备份后弹解锁；同环境静默解锁不弹
+        let master_gate = master::MasterGate::init();
         let s = Self {
             tab: signal(0usize),
-            nav_order: signal(vec![3, 2, 0, 1, 4, 5]),
+            nav_order: signal(vec![3, 6, 2, 7, 8, 0, 1, 4, 5]),
             sidebar_visible: signal(true),
             theme_mode: signal(if system_light_theme() { 0 } else { 1 }),
             theme_epoch: signal(vec![()]),
+            window_title: signal(String::new()),
             totp: totp::TotpUi::new(),
             password: password::PasswordUi::new(),
             turso: turso::TursoUi::new(),
+            mysql: mysql::MySqlUi::new(),
+            pg: pg::PgUi::new(),
             sftp: sftp::SftpUi::new(),
+            s3: s3::S3Ui::new(),
             remote: remote::RemoteUi::new(),
+            master_gate,
         };
         // ── 回填上次输入：AppData 记忆缓存（core::settings），尽力而为 ──
         // 文本输入为空时跳过（无记忆价值，保留默认占位）；数值/下拉索引做越界防护。
         let saved = core::settings::load();
-        // ── 恢复侧栏菜单顺序（逗号分隔的模块 id；须 6 个且无重复才采纳）──
+        // ── 恢复侧栏菜单顺序（逗号分隔的模块 id；须 9 个且无重复才采纳）──
         if let Some(v) = saved.get("nav.order") {
             let ids: Vec<usize> = v
                 .split(',')
                 .filter_map(|p| p.trim().parse::<usize>().ok())
-                .filter(|&i| i < 6)
+                .filter(|&i| i < 9)
                 .collect();
-            let mut seen = [false; 6];
-            let ok = ids.len() == 6
+            let mut seen = [false; 9];
+            let ok = ids.len() == 9
                 && ids.iter().all(|&i| {
                     if seen[i] {
                         false
@@ -93,9 +185,9 @@ impl AppState {
                     }
                 });
             if ok {
-                // 旧默认顺序 (0,1,2,3,4,5) 视为「未自定义」，迁移到新默认
-                // （SFTP/SSH、Turso 置顶）；用户拖拽过的顺序原样保留。
-                if ids != [0, 1, 2, 3, 4, 5] {
+                // 旧 7 项顺序视为「未含 MySQL/PG」，迁移到新默认（追加在 S3 之后）；
+                // 已含 9 项的用户拖拽顺序原样保留。
+                if ids.len() == 9 && ids != [0, 1, 2, 3, 4, 5, 6, 7, 8] {
                     s.nav_order.set(ids);
                 }
             }
@@ -126,12 +218,13 @@ impl AppState {
         if let Some(v) = saved.get("sftp.pass") {
             s.sftp.pass.set(v.clone());
         }
-        fill("turso.db_path", s.turso.db_path);
-        fill_idx("turso.mode", s.turso.turso_mode, 2);
-        fill("turso.url", s.turso.turso_url);
-        if let Some(v) = saved.get("turso.token") {
-            s.turso.turso_token.set(v.clone());
+        fill("mysql.host", s.mysql.host);
+        fill("mysql.port", s.mysql.port);
+        fill("mysql.user", s.mysql.user);
+        if let Some(v) = saved.get("mysql.pass") {
+            s.mysql.pass.set(v.clone());
         }
+        fill("pg.url", s.pg.url);
         fill("totp.account", s.totp.account);
         fill("totp.issuer", s.totp.issuer);
         fill_idx("totp.algo", s.totp.algo_sel, 3);
@@ -161,102 +254,58 @@ pub(crate) fn sink<T: Send + 'static>(tx: Sender<T>) -> core::MsgSink<T> {
     })
 }
 
-/// 应用图标：`logo.svg` 矢量源按需光栅化。平台在**不同场合要不同尺寸**
-/// 的图标（任务栏取大档，标题栏取小档），`IconSource::sized` 让每档都按
-/// 实际物理像素 1:1 现画，避免固定位图交给系统缩放导致高 DPI 发糊。
-fn app_icon() -> windui::icon::IconSource {
-    windui::icon::IconSource::sized(|size| {
-        // Image::from_svg_bytes 返回 Result；失败走 1×1 透明像素兜底
-        windui::render::image::Image::from_svg_bytes(icons::LOGO, Some(size))
-            .ok()
-            .and_then(|img| windui::icon::WindowIcon::from_image(&img))
-            .unwrap_or_else(|| {
-                // 解析失败兜底：1×1 透明像素（正常不会走到）
-                windui::icon::WindowIcon::from_rgba(1, 1, vec![0, 0, 0, 0])
-                    .expect("1×1 RGBA 必然合法")
-            })
-    })
-}
-
-/// 模块 id → 模块名（窗体标题后缀，与侧栏名称一致：如「启途 - 关于」）
-fn module_name(id: usize) -> &'static str {
-    match id {
-        0 => lang::TAB_2FA(),
-        1 => lang::TAB_PASSWORD(),
-        2 => lang::TAB_TURSO(),
-        3 => lang::TAB_SFTP(),
-        4 => lang::TAB_REMOTE(),
-        _ => lang::TAB_ABOUT(),
-    }
-}
-
-/// 同步主窗体标题为「APP_NAME - 模块名」。windui 不提供运行期改标题 API，
-/// Windows 上直接调 SetWindowTextW（按自身 PID 找主窗口）；其它平台为 no-op
-/// （标题保持 APP_NAME，未来跨平台版本可换平台原生实现）。
-fn sync_window_title(tab: usize) {
-    let text = format!("{} - {}", lang::APP_NAME(), module_name(tab));
-    set_window_title(&text);
-}
-
-#[cfg(windows)]
-fn set_window_title(text: &str) {
-    use windows_sys::Win32::Foundation::LPARAM;
-    use windows_sys::Win32::UI::WindowsAndMessaging::{EnumWindows, SetWindowTextW};
-
-    // EnumWindows 回调：找本进程的可见顶层窗口（主 GUI），把句柄写回上下文
-    unsafe extern "system" fn find_main_window(
-        hwnd: windows_sys::Win32::Foundation::HWND,
-        lparam: LPARAM,
-    ) -> i32 {
-        use windows_sys::Win32::UI::WindowsAndMessaging::{GetWindowThreadProcessId, IsWindowVisible};
-        let ctx = lparam as *mut (u32, isize);
-        let mut wpid: u32 = 0;
-        GetWindowThreadProcessId(hwnd, &mut wpid);
-        if wpid == (*ctx).0 && IsWindowVisible(hwnd) != 0 {
-            (*ctx).1 = hwnd;
-            return 0; // FALSE：找到即停止枚举
-        }
-        1 // TRUE：继续
-    }
-
-    let mut ctx: (u32, isize) = (std::process::id(), 0);
-    unsafe {
-        EnumWindows(Some(find_main_window), &mut ctx as *mut (u32, isize) as LPARAM);
-        // windows-sys 中 HWND = isize：找到的主窗口句柄非 0 即有效
-        let hwnd = ctx.1;
-        if hwnd != 0 {
-            let wide: Vec<u16> = text.encode_utf16().chain(std::iter::once(0)).collect();
-            SetWindowTextW(hwnd, wide.as_ptr());
-        }
-    }
-}
-
-#[cfg(not(windows))]
-fn set_window_title(_text: &str) {}
-
 // ══════════════════════════════════════════════════════════════════
 // 应用入口：创建全部状态信号 + 注册后台任务通道，构建 Element 树，运行窗口
 // ══════════════════════════════════════════════════════════════════
 
 pub fn run() {
     let state = AppState::new();
-    // 窗口标题跟随启动时语言（中文系统 → 骑途，其它 → Qi Toolbox）；
-    // 应用图标 = logo.svg（任务栏/标题栏/Alt+Tab 均生效）
-    let mut app = App::new(lang::APP_NAME(), 1000, 700).icon(app_icon());
-    // 主窗口就绪后把「APP_NAME - 默认模块」写入窗体标题（一次性后台线程，
-    // 之后每次切页/切语言由对应回调同步；windui 无运行期标题接口，见 set_window_title）
-    // 默认模块 = 菜单第一项（见 AppState::new 的回填逻辑）
+    // 窗口标题绑 Signal：初始为「APP_NAME - 默认模块」，切页/切语言时 set 即跟随
+    // （应用图标 = logo.svg，任务栏/标题栏/Alt+Tab 均生效）
     let first_tab = state.tab.get();
-    std::thread::spawn(move || {
-        std::thread::sleep(std::time::Duration::from_millis(500));
-        sync_window_title(first_tab);
-    });
+    let title_sig = state.window_title;
+    set_window_title(title_sig, first_tab);
+    let mut app = App::new(lang::APP_NAME(), 1000, 700)
+        .title(title_sig)
+        .icon(app_icon())
+        .theme(if system_light_theme() {
+            theme::light()
+        } else {
+            theme::dark()
+        });
 
-    // ── Turso 后台任务通道：数据库操作在后台线程执行，结果经此回 UI 线程 ──
-    // 消息统一交给 TursoUi::on_db_msg 消费（写信号 + 节流续接排队表）。
-    let chan = state.clone();
-    let tx = app.channel::<core::db::DbMsg>(move |_ctx, msg| chan.turso.on_db_msg(msg));
-    state.turso.set_tx(tx.clone());
+    // 更新检查通道：后台线程请求 GitHub Releases，结果回 UI 线程写状态信号
+    // （Signal 非 Send，不能跨线程直接 set）；发送端存全局，供手动「检查更新」复用
+    let tx_update = app.channel::<UpdateMsg>(move |_ctx, msg| {
+        update_status().set(match msg {
+            UpdateMsg::New(v) => UpdateStatus::New(v),
+            UpdateMsg::Latest => UpdateStatus::UpToDate,
+            UpdateMsg::Failed => UpdateStatus::Failed,
+        });
+    });
+    UPDATE_TX.with(|v| *v.borrow_mut() = Some(tx_update));
+    // 启动后台检查一次（尽力而为，失败静默不占位）
+    spawn_update_check();
+
+    // ── 数据库后台任务通道：Turso/MySQL/PG 各自独立通道 ──
+    // 三页共用一个通道时 TableLoaded 等消息无来源标记，会被其它页的
+    // on_db_msg 误消费（MySQL 页显示 PG 数据）；各页 spawn 时传自己的
+    // tx()，拆分通道后消息只回到发起页。
+    let chan_t = state.clone();
+    let tx_turso = app.channel::<core::db::DbMsg>(move |_ctx, msg| {
+        chan_t.turso.on_db_msg(msg);
+    });
+    let chan_m = state.clone();
+    let tx_mysql = app.channel::<core::db::DbMsg>(move |_ctx, msg| {
+        chan_m.mysql.on_db_msg(msg);
+    });
+    let chan_p = state.clone();
+    let tx_pg = app.channel::<core::db::DbMsg>(move |_ctx, msg| {
+        chan_p.pg.on_db_msg(msg);
+    });
+    state.turso.set_tx(tx_turso);
+    state.mysql.set_tx(tx_mysql);
+    state.pg.set_tx(tx_pg);
 
     // ── SFTP 后台工作线程：SSH/SFTP 会话跨命令存活，结果经通道回 UI 线程 ──
     let chan2 = state.clone();
@@ -267,288 +316,27 @@ pub fn run() {
     state.sftp.set_cancel(sftp_cancel);
     // ── 远程检测通道：网络探测在后台线程执行，结果经此回 UI 线程 ──
     let chan3 = state.clone();
-    let tx_remote = app.channel::<core::remote::RemoteMsg>(move |_ctx, msg| {
-        chan3.remote.on_msg(msg)
-    });
+    let tx_remote =
+        app.channel::<core::remote::RemoteMsg>(move |_ctx, msg| chan3.remote.on_msg(msg));
     state.remote.set_tx(tx_remote);
+
+    // ── S3 后台工作线程：阻塞 HTTP 在后台执行，结果经通道回 UI 线程 ──
+    let chan4 = state.clone();
+    let tx_s3 = app.channel::<core::s3::S3Msg>(move |_ctx, msg| chan4.s3.on_msg(msg));
+    state.s3.set_cmd(core::s3::spawn_worker(sink(tx_s3)));
 
     // 运行期主题句柄：克隆进主题按钮回调，set() 下一帧热切换
     let th = app.theme_handle();
 
-    // UI 挂在 host_signal 上：theme_epoch 变化（主题切换）即整树重建
-    let root = Element::host_signal(state.theme_epoch, move |_| {
-        build_ui(&state, th.clone())
+    // 关闭软件时清空剪贴板：验证码/密码等敏感内容不残留（用户要求；不做定时清空）
+    let app = app.on_close_request(|ctx| {
+        ctx.clipboard_set("");
+        true // 返回 true 继续默认关闭流程
     });
+
+    // UI 挂在 host_signal 上：theme_epoch 变化（主题切换）即整树重建
+    let root = Element::host_signal(state.theme_epoch, move |_| build_ui(&state, th.clone()));
 
     // 必须复用注册过 channel 的同一个 App 实例（否则后台线程消息无人接收）
     app.content(root).run();
-}
-
-// ══════════════════════════════════════════════════════════════════
-// 主界面构建：左侧栏导航 + 右侧内容区
-// （主题切换时经 host_signal 以 theme_epoch 为信号整树重建）
-// ══════════════════════════════════════════════════════════════════
-
-fn build_ui(state: &AppState, th: ThemeHandle) -> Element {
-    // Signal 为 Copy 句柄：复制出来供「构建期」闭包共享
-    let tab = state.tab;
-    let theme_mode = state.theme_mode;
-    let theme_epoch = state.theme_epoch;
-    let sidebar_visible = state.sidebar_visible;
-
-    /// 侧栏宽度（逻辑 px）。折叠手柄的停靠位置以它为基准（贴齐右侧分隔线）。
-    const SIDEBAR_W: i32 = 196;
-    /// 折叠手柄宽度。分隔线与内容区之间的空隙也用这个值——手柄恰好嵌在
-    /// 空隙里，不遮挡内容。
-    const HANDLE_W: i32 = 9;
-
-    // ── 左侧栏：品牌区 + 可拖拽排序的导航（2FA / 密码 / Turso / SFTP/SSH / 远程 / 关于）──
-    // 模块定义：数组下标即模块 id，内容页按 id 显隐；拖拽只调侧栏顺序、不改 id。
-    let nav_items: [(&str, &[u8]); 6] = [
-        (lang::TAB_2FA(), icons::ZAP),
-        (lang::TAB_PASSWORD(), icons::LOCK),
-        (lang::TAB_TURSO(), icons::TABLE_ICON),
-        (lang::TAB_SFTP(), icons::SERVER),
-        (lang::TAB_REMOTE(), icons::GLOBE),
-        (lang::TAB_ABOUT(), icons::INFO),
-    ];
-    // 数据驱动重排：顺序真值源 = nav_order 信号（拖拽后应用自行改信号 → 整列重建，
-    // 反向同步天然成立，恢复默认/重新载入配置都只需要 set 信号）
-    let nav_order = state.nav_order;
-    let nav_list = Element::reorder_list_signal(nav_order, {
-        move |id: usize, handle: Element| {
-            let (name, icon) = nav_items[id];
-            // 手柄以覆盖层与可点行并列（不能嵌进 clickable 祖先，否则冒泡被 Clickable 截断）；
-            // 覆盖层空白区命中穿透（与 nav_item 的指示条先例一致），只有手柄可按住拖动
-            Element::stack()
-                .width_match()
-                .height(38)
-                .child(widgets::nav_item(name, icon, id, tab, move |mid| {
-                    // 切页后把当前模块写入窗体标题（如「启途 - 关于」）
-                    sync_window_title(mid);
-                }))
-                .child(
-                    Element::row()
-                        .fill()
-                        .child(Element::flex_spacer())
-                        .child(
-                            Element::stack()
-                                .width(22)
-                                .height(38)
-                                .child(handle.align(Align::Center)),
-                        ),
-                )
-        }
-    })
-    .on_reorder(move |_ctx, from, to| {
-        // 移动模块 id（顺序未变时框架不触发回调）
-        nav_order.update(|v| {
-            let x = v.remove(from);
-            v.insert(to.min(v.len()), x);
-        });
-        // 持久化菜单顺序（尽力而为，下次启动回填）
-        let joined = nav_order
-            .get()
-            .iter()
-            .map(|i| i.to_string())
-            .collect::<Vec<_>>()
-            .join(",");
-        crate::core::settings::commit(&[("nav.order", Some(joined.as_str()))]);
-    });
-    let nav_col = Element::col().width_match().spacing(3).child(nav_list);
-
-    // ── 侧栏底部：语言 + 主题 两个二选一 toggle 并列一行 ──
-    // 语言 toggle：无底色 clickable 行，仅文字随状态变化（中↔EN），点击切到另一种
-    let lang_toggle = {
-        let is_zh = lang::current() == lang::LANG_ZH;
-        Element::stack()
-            .clickable()
-            .on_click(move |_| {
-                lang::set_current(if lang::current() == lang::LANG_ZH {
-                    lang::LANG_EN
-                } else {
-                    lang::LANG_ZH
-                });
-                theme_epoch.update(|v| v.push(()));
-                // 界面语言切换后，窗体标题中的模块名跟随当前语言刷新
-                sync_window_title(tab.get());
-            })
-            .weight(1.0)
-            .height(28)
-            .corner(6.0)
-            .tooltip(lang::TOGGLE_LANG())
-            .child(
-                Element::label(if is_zh { "中" } else { "EN" })
-                    .font_size(12.0)
-                    .font_weight(600)
-                    .fg_role(Role::TextMuted)
-                    .align(Align::Center),
-            )
-    };
-    // 主题 toggle：图标显示当前深浅色，点击切换；启动时默认跟随系统
-    let theme_btn = widgets::theme_toggle(theme_mode, th, theme_epoch);
-    let footer_row = Element::row()
-        .width_match()
-        .spacing(4)
-        .child(lang_toggle)
-        .child(theme_btn);
-
-    let sidebar = Element::col()
-        .width(SIDEBAR_W)
-        .height_match()
-        .bg_role(Role::Bg)
-        .padding_xy(10, 12)
-        .spacing(12)
-        .visible_when(move || sidebar_visible.get())
-        .child(
-            Element::col()
-                .width_match()
-                .spacing(2)
-                .padding_xy(10, 6)
-                .child(
-                    Element::label(lang::APP_NAME())
-                        .font_size(16.0)
-                        .font_weight(700)
-                        .fg_role(Role::Text),
-                )
-                .child(
-                    Element::label(format!("v{}", env!("CARGO_PKG_VERSION")))
-                        .font_size(11.0)
-                        .fg_role(Role::TextMuted),
-                ),
-        )
-        .child(Element::scroll().weight(1.0).child(nav_col))
-        .child(footer_row);
-
-    // ── 内容区：六个页面按导航显隐 ──
-    let content = Element::stack()
-        .height_match()
-        .weight(1.0)
-        .child(
-            totp::build_totp_tab(&state.totp).visible_when(move || tab.get() == 0),
-        )
-        .child(
-            password::build_password_tab(&state.password).visible_when(move || tab.get() == 1),
-        )
-        .child(turso::build_turso_tab(&state.turso).visible_when(move || tab.get() == 2))
-        .child(sftp::build_sftp_tab(&state.sftp).visible_when(move || tab.get() == 3))
-        .child(remote::build_remote_tab(&state.remote).visible_when(move || tab.get() == 4))
-        .child(widgets::build_about_page().visible_when(move || tab.get() == 5));
-
-    // ── 菜单折叠手柄：贴在侧栏分隔线右侧的**右半胶囊**（SVG 实心形状，9×46，
-    // 左边缘与分隔线严丝合缝，染 Divider 色后视觉上是"线条鼓出的一块"），
-    // 点击收起/展开左侧菜单。两个方向变体由 visible_when 逐帧二选一（图标随
-    // 开合翻转，无需整树重建）；外层 row 无 clickable，空白区命中穿透，
-    // 只有手柄本体吃点击。
-    let make_handle = move |chevron: &[u8]| {
-        Element::stack()
-            .width(HANDLE_W)
-            .height(46)
-            // hover 反馈（clickable 的半透明叠层）用同半径圆角，贴合半胶囊轮廓
-            .corner(4.5)
-            .clickable()
-            .tooltip(lang::TOGGLE_SIDEBAR())
-            .on_click(move |_| {
-                sidebar_visible.set(!sidebar_visible.get());
-                // 记忆开合状态（尽力而为，下次启动回填）
-                let show = sidebar_visible.get();
-                crate::core::settings::commit(&[(
-                    "sidebar.show",
-                    Some(if show { "1" } else { "0" }),
-                )]);
-            })
-            .child(
-                Element::image_content(
-                    ImageContent::from_svg_bytes(icons::HANDLE_TAB, Some(9))
-                        .tint(Role::Divider.resolve(&windui::theme::current())),
-                )
-                .align(Align::Center),
-            )
-            .child(
-                Element::image_content(
-                    ImageContent::from_svg_bytes(chevron, Some(14))
-                        .tint(Role::TextMuted.resolve(&windui::theme::current())),
-                )
-                .align(Align::Center),
-            )
-    };
-    // 展开态：分隔线占 [SIDEBAR_W, SIDEBAR_W+1)，手柄左缘从线右侧 (SIDEBAR_W+1) 起贴齐。
-    let handle_open = Element::row()
-        .fill()
-        .cross(Align::Center)
-        .visible_when(move || sidebar_visible.get())
-        .child(Element::leaf().width(SIDEBAR_W + 1))
-        .child(make_handle(icons::CHEVRON_LEFT));
-    // 收起态：分隔线退到最左 [0,1)，手柄同样贴其右侧。
-    let handle_closed = Element::row()
-        .fill()
-        .cross(Align::Center)
-        .visible_when(move || !sidebar_visible.get())
-        .child(Element::leaf().width(1))
-        .child(make_handle(icons::CHEVRON_RIGHT));
-
-    // ── 根节点：左侧栏 + 分隔线 + 手柄空隙 + 右侧内容区（+ 折叠手柄浮层）──
-    // 分隔线后留 HANDLE_W 空隙：手柄整条嵌在空隙内（展开/收起都贴线右侧），
-    // 不遮挡内容。
-    Element::stack()
-        .fill()
-        .bg_role(Role::Bg)
-        .child(
-            Element::row()
-                .fill()
-                .child(sidebar)
-                .child(
-                    Element::leaf()
-                        .width(1)
-                        .height_match()
-                        .bg_role(Role::Divider),
-                )
-                .child(Element::leaf().width(HANDLE_W))
-                .child(content),
-        )
-        .child(handle_open)
-        .child(handle_closed)
-}
-
-/// 读取 Windows「应用」深浅色偏好（注册表 AppsUseLightTheme：1=浅色 0=深色）。
-/// 读取失败或非 Windows 平台一律按浅色处理。
-#[cfg(windows)]
-fn system_light_theme() -> bool {
-    use windows_sys::Win32::System::Registry::{
-        RegCloseKey, RegOpenKeyExW, RegQueryValueExW, HKEY_CURRENT_USER, KEY_READ,
-    };
-    let path: Vec<u16> = "Software\\Microsoft\\Windows\\CurrentVersion\\Themes\\Personalize"
-        .encode_utf16()
-        .chain(std::iter::once(0))
-        .collect();
-    let name: Vec<u16> = "AppsUseLightTheme"
-        .encode_utf16()
-        .chain(std::iter::once(0))
-        .collect();
-    let mut key = 0isize;
-    let mut value: u32 = 1;
-    let mut size = std::mem::size_of::<u32>() as u32;
-    let ok = unsafe {
-        RegOpenKeyExW(HKEY_CURRENT_USER, path.as_ptr(), 0, KEY_READ, &mut key) == 0
-            && RegQueryValueExW(
-                key,
-                name.as_ptr(),
-                std::ptr::null(),
-                std::ptr::null_mut(),
-                &mut value as *mut u32 as *mut u8,
-                &mut size,
-            ) == 0
-            && size == 4
-    };
-    if key != 0 {
-        unsafe {
-            RegCloseKey(key);
-        }
-    }
-    ok && value != 0
-}
-
-#[cfg(not(windows))]
-fn system_light_theme() -> bool {
-    true
 }

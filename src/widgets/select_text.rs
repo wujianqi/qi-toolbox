@@ -22,6 +22,8 @@
 use std::cell::{Cell, RefCell};
 use std::collections::HashMap;
 
+use super::sel_core;
+
 use windui::core::{EventCtx, Widget};
 use windui::event::{CursorShape, Event, Key, KeyEvent, MenuItem, MouseButton, PointerKind};
 use windui::geometry::{Rect, Size};
@@ -33,7 +35,8 @@ use windui::text::{TextEngine, TextStyle};
 use windui::ui::caret::{CaretOpts, CaretState};
 
 use crate::lang;
-use crate::ui::syntax_input::MeasureKey;
+
+use super::syntax_input::MeasureKey;
 
 /// 内容区四边留白（逻辑 px）。绘制与命中必须用同一份值，否则选、画错位。
 const PAD: i32 = 6;
@@ -95,7 +98,12 @@ struct Layout {
 impl Layout {
     fn empty() -> Self {
         Self {
-            rows: vec![VRow { start: 0, end: 0, x: vec![0.0], text: String::new() }],
+            rows: vec![VRow {
+                start: 0,
+                end: 0,
+                x: vec![0.0],
+                text: String::new(),
+            }],
             line_h: 18.2,
             width: 0,
             scale: 1.0,
@@ -155,7 +163,7 @@ pub struct SelectText {
 
 impl SelectText {
     pub fn new(text: Signal<String>) -> Self {
-        let cursor = text.with(|s| s.chars().count());
+        let cursor = text.try_with(|s| s.chars().count()).unwrap_or(0);
         Self {
             text,
             cursor: Cell::new(cursor),
@@ -170,42 +178,38 @@ impl SelectText {
 
     // ── 文本 / 字节换算 ──────────────────────────────────────────────
 
+    /// 死句柄容错读取：信号源可能来自会整树重建的宿主（主题切换 host_signal），
+    /// 重建瞬间旧子树的句柄已失效但控件仍可能被事件/paint 摸到——读死句柄
+    /// 回退空串而不是 panic（signal.rs:545 曾致窗体闪退）。
+    fn try_text<R>(&self, f: impl FnOnce(&str) -> R) -> Option<R> {
+        self.text.try_with(|s| f(s))
+    }
+
     fn text_clone(&self) -> String {
-        self.text.with(|s| s.clone())
+        self.try_text(|s| s.to_string()).unwrap_or_default()
     }
 
     fn char_count(&self) -> usize {
         // 布局与当前文本一致时直接用缓存的 total（memcmp 级校验，远快于逐字符
         // 计数）——selection/clamp 每帧多处调用，长输出下 O(N) 计数是白付的。
         let lay = self.layout.borrow();
-        if lay.valid && self.text.with(|s| lay.text.as_str() == *s) {
+        if lay.valid && self.try_text(|s| lay.text.as_str() == s) == Some(true) {
             return lay.total;
         }
         drop(lay);
-        self.text.with(|s| s.chars().count())
+        self.try_text(|s| s.chars().count()).unwrap_or(0)
     }
 
     /// 规范化选区 [start, end)。无选区返回 None。
     fn selection(&self) -> Option<(usize, usize)> {
-        let total = self.char_count();
-        let c = self.cursor.get().min(total);
-        let a = self.anchor.get()?.min(total);
-        if a == c {
-            None
-        } else if a < c {
-            Some((a, c))
-        } else {
-            Some((c, a))
-        }
+        sel_core::normalize_selection(self.cursor.get(), self.anchor.get(), self.char_count())
     }
 
     /// 选区文本（供复制）。无选区返回 None。
     fn selected_str(&self) -> Option<String> {
-        let (s, e) = self.selection()?;
-        self.text.with(|t| {
-            let (bs, be) = (byte_at(t, s), byte_at(t, e));
-            Some(t[bs..be].to_string())
-        })
+        let sel = self.selection()?;
+        self.try_text(|t| sel_core::selected_str(t, Some(sel)))
+            .unwrap_or_default()
     }
 
     /// 光标/锚点钳制到合法字符下标（文本被外部改写后可能悬空/越界）。
@@ -252,7 +256,7 @@ impl SelectText {
         let mut lay = self.layout.borrow_mut();
         // 缓存键用无分配比较（&str 直比）：未变则跳过，**不克隆文本**。
         // measure/paint 每帧各调一次本函数，长输出下每帧两次整串 clone 是白付的。
-        let text_changed = self.text.with(|s| lay.text.as_str() != *s);
+        let text_changed = self.try_text(|s| lay.text.as_str() != s).unwrap_or(true);
         if lay.valid
             && !text_changed
             && lay.line_h == line_h
@@ -309,7 +313,12 @@ impl SelectText {
         let lc = prefix.len() - 1;
         let mut rows = Vec::new();
         if lc == 0 {
-            rows.push(VRow { start: ls, end: ls, x: vec![0.0], text: String::new() });
+            rows.push(VRow {
+                start: ls,
+                end: ls,
+                x: vec![0.0],
+                text: String::new(),
+            });
             return rows;
         }
         let row_for = |first: usize, brk: usize| -> VRow {
@@ -377,7 +386,9 @@ impl SelectText {
     fn row_of(&self, gi: usize) -> usize {
         let lay = self.layout.borrow();
         let gi = gi.min(lay.total);
-        lay.rows.partition_point(|r| r.start <= gi).saturating_sub(1)
+        lay.rows
+            .partition_point(|r| r.start <= gi)
+            .saturating_sub(1)
     }
 
     /// 光标所在显示行：返回 (行下标, 该行引用)。
@@ -420,39 +431,12 @@ impl SelectText {
             return self.cursor.get().min(self.char_count());
         }
         let cy = py - (b.y as f32 + PAD as f32) + self.scroll_y.get();
-        let line_h = lay.line_h.max(1.0);
-        let row_floor = (cy / line_h).floor();
-        let row = if row_floor < 0.0 {
-            0
-        } else {
-            (row_floor as usize).min(lay.rows.len().saturating_sub(1))
-        };
+        let row = sel_core::row_at_y(cy, lay.line_h, lay.rows.len());
         let r = &lay.rows[row];
-        let len = r.len();
         // 行内 x 单调不减：二分定位点击点所在列。点击点在某显示字符中部时，
         // 落在左半偏左、右半偏右（与 SyntaxInput 同语义）。
         let cx = (px - (b.x as f32 + PAD as f32)).max(0.0);
-        let col = if cx <= r.x[0] {
-            0
-        } else if cx >= *r.x.last().unwrap_or(&0.0) {
-            len
-        } else {
-            let mut lo = 0usize;
-            let mut hi = len;
-            while lo + 1 < hi {
-                let mid = lo + (hi - lo) / 2;
-                if r.x[mid] <= cx {
-                    lo = mid;
-                } else {
-                    hi = mid;
-                }
-            }
-            if cx <= (r.x[lo] + r.x[hi]) / 2.0 {
-                lo
-            } else {
-                hi
-            }
-        };
+        let col = sel_core::col_at_x(&r.x, cx);
         (r.start + col).min(lay.total)
     }
 
@@ -467,25 +451,8 @@ impl SelectText {
     /// 选中下标 gi 处"词"的区间（用于双击）：向两侧扫到空白界。
     fn word_around(&self, gi: usize) -> (usize, usize) {
         let chars: Vec<char> = self.text_clone().chars().collect();
-        let total = chars.len();
-        if total == 0 {
-            return (0, 0);
-        }
         // 词 = 连续非空白（含 `_`，排除纯空白）；命中空白则只选该字符。
-        let is_w = |c: char| !c.is_whitespace();
-        let gi = gi.min(total.saturating_sub(1));
-        if !is_w(chars[gi]) {
-            return (gi, gi + 1);
-        }
-        let mut s = gi;
-        while s > 0 && is_w(chars[s - 1]) {
-            s -= 1;
-        }
-        let mut e = gi + 1;
-        while e < total && is_w(chars[e]) {
-            e += 1;
-        }
-        (s, e)
+        sel_core::word_around(&chars, gi, |c| !c.is_whitespace())
     }
 
     /// 选中光标所在显示行整段（三击）。
@@ -618,6 +585,8 @@ impl SelectText {
             pressed: true,
             shift: false,
             ctrl: true,
+            alt: false,
+            meta: false,
         };
         vec![
             MenuItem::key(lang::MENU_COPY(), ctrl(0x43), has_sel),
@@ -627,12 +596,6 @@ impl SelectText {
 }
 
 // 自由辅助：byte offset of char index。
-fn byte_at(s: &str, gi: usize) -> usize {
-    s.char_indices()
-        .nth(gi)
-        .map(|(b, _)| b)
-        .unwrap_or(s.len())
-}
 
 /// 一逻辑行的前缀宽度表（`prefix[j]` = 前 j 个字符的**整串**实测宽，相对行首）。
 /// 优先命中逐行宽度缓存；未命中才逐前缀整串测量（O(行长²) 字符工作量），测完回填。
@@ -680,11 +643,10 @@ impl Widget for SelectText {
         let lay = self.layout.borrow();
         let intrinsic = (lay.rows.len() as f32 * lay.line_h) as i32 + 2 * PAD;
         let min = (lay.line_h as i32 + 2 * PAD).max(1);
-        let h = if avail.h > 0 {
-            intrinsic.clamp(min, avail.h)
-        } else {
-            intrinsic.max(min)
-        };
+        // 视口模型：父级给了真实高度就填满分配区（不随内容缩——否则短文本时控件只是
+        // 一小条，点下方空白落不到控件上、无法聚焦）；无约束（含 windui 哨兵值
+        // i32::MAX/4）时回退固有高度。哨兵判定统一走 layout_hint::viewport_height。
+        let h = super::layout_hint::viewport_height(avail.h, intrinsic, min);
         Size::new(avail.w, h)
     }
 
@@ -764,7 +726,13 @@ impl Widget for SelectText {
                     if c1 < c2 {
                         let x1 = bounds.x as f32 + PAD as f32 + r.x[c1];
                         let x2 = bounds.x as f32 + PAD as f32 + r.x[c2];
-                        canvas.fill_rect(x1, ry, (x2 - x1).max(1.0), lay.line_h, &Paint::fill(sel_c));
+                        canvas.fill_rect(
+                            x1,
+                            ry,
+                            (x2 - x1).max(1.0),
+                            lay.line_h,
+                            &Paint::fill(sel_c),
+                        );
                     }
                 }
             }
@@ -797,7 +765,8 @@ impl Widget for SelectText {
             // 复用上方已借用的 lay（同帧同一份布局，不再重复 borrow）
             if lay.rows_valid() {
                 let (row, r) = self.caret_row(&lay);
-                let x = bounds.x as f32 + PAD as f32 + r.x[Self::col_of(&lay, row, self.cursor.get())];
+                let x =
+                    bounds.x as f32 + PAD as f32 + r.x[Self::col_of(&lay, row, self.cursor.get())];
                 let y = self.row_top(bounds, lay.line_h, row);
                 // 光标在 restore 之后画（不在文本 clip 内），故须自带视口裁剪：
                 // 滚动后光标行滑出视口时若不裁，光标条会越过控件边界叠到相邻 UI 上
@@ -1015,7 +984,49 @@ impl SelectText {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use windui::signal::signal;
+    use windui::signal::{signal, SignalScope};
+
+    /// 死句柄容错：信号被 dispose 后，new / 读取 / rebuild / 复制 全链路不 panic，
+    /// 一律回退空串 / 0（曾致主题切换整树重建时窗体闪退，signal.rs:545）。
+    #[test]
+    fn dead_signal_handle_degrades_gracefully() {
+        let sig = {
+            let mut scope = SignalScope::new();
+            let s = scope.collect(|| signal(String::from("hello")));
+            assert!(s.is_alive());
+            s
+            // scope drop → dispose → 句柄失效（模拟整树重建回收构建期信号）
+        };
+        assert!(!sig.is_alive());
+
+        // 构造（含 cursor 初始化）不 panic
+        let st = SelectText::new(sig);
+        // 各读取路径回退空串 / 0，不再触发 signal.rs:545
+        assert_eq!(st.char_count(), 0);
+        assert_eq!(st.text_clone(), "");
+        assert_eq!(st.selected_str(), None);
+        // 布局重建走"文本已变"分支，产出空布局而非 panic
+        let ts = TextStyle::new(14.0);
+        st.rebuild(19.6, 1.0, 300, &ts, |p| (p.chars().count() as f32) * 10.0);
+        let lay = st.layout.borrow();
+        assert!(lay.valid);
+        assert_eq!(lay.total, 0);
+    }
+
+    /// 活信号路径回归：容错改造不改变正常读写行为。
+    #[test]
+    fn alive_signal_behavior_unchanged() {
+        let sig = signal(String::from("ab\ncd"));
+        let st = SelectText::new(sig);
+        assert_eq!(st.char_count(), 5);
+        assert_eq!(st.text_clone(), "ab\ncd");
+        // 全选后复制拿到全文
+        st.select_all();
+        assert_eq!(st.selected_str().as_deref(), Some("ab\ncd"));
+        // 外部改写文本后 char_count 跟随
+        sig.set(String::from("xyz"));
+        assert_eq!(st.char_count(), 3);
+    }
 
     /// 等宽 10px 的前缀宽度表（前 j 字符宽 = 10j）。
     fn mono_prefix(lc: usize) -> Vec<f32> {
@@ -1027,7 +1038,11 @@ mod tests {
     fn assert_partition(chars: &str, rows: &[VRow], lc: usize, max_w: f32) {
         assert_eq!(rows[0].start, 0);
         for r in rows {
-            assert_eq!(r.x.len(), r.end - r.start + 1, "x 列数 = 字符数+1（末项行尾右缘）");
+            assert_eq!(
+                r.x.len(),
+                r.end - r.start + 1,
+                "x 列数 = 字符数+1（末项行尾右缘）"
+            );
             assert!(r.x.first() == Some(&0.0), "行首 x 归零");
             for w in r.x.windows(2) {
                 assert!(w[1] >= w[0], "x 单调不减");
@@ -1042,8 +1057,11 @@ mod tests {
             }
         }
         assert_eq!(rows.last().unwrap().end, lc);
-        // 每个字符恰出现一次（拼回原文）。
-        let joined: String = rows.iter().flat_map(|r| chars[r.start..r.end].chars()).collect();
+        // 每个字符恰出现一次（拼回原文）。start/end 是字符下标，须按字符切片。
+        let joined: String = rows
+            .iter()
+            .flat_map(|r| chars.chars().skip(r.start).take(r.end - r.start))
+            .collect();
         assert_eq!(joined, chars, "字符零丢失零重复");
     }
 
@@ -1111,7 +1129,11 @@ mod tests {
         assert_eq!(rows.len(), 2);
         // 行 2 的 x 必须恰 3 项（2 字符 a a + 行尾右缘），而不是 4 项
         // （误含行 1 末尾的 a 会变成 3 字符 + 右缘）。
-        assert_eq!(rows[1].x.len(), 3, "第二行列数 = 第二行字符数+1（行尾右缘）");
+        assert_eq!(
+            rows[1].x.len(),
+            3,
+            "第二行列数 = 第二行字符数+1（行尾右缘）"
+        );
         assert_eq!(rows[1].x, vec![0.0, 10.0, 20.0]);
         assert_partition("aaaaa", &rows, 5, 30.0);
     }
@@ -1122,9 +1144,25 @@ mod tests {
         let mut calls = 0;
         let mut widths = HashMap::new();
         let cs: Vec<char> = "hello".chars().collect();
-        let _ = line_prefix("hello", &cs, &mut |_| { calls += 1; 10.0 }, &mut widths);
+        let _ = line_prefix(
+            "hello",
+            &cs,
+            &mut |_| {
+                calls += 1;
+                10.0
+            },
+            &mut widths,
+        );
         assert_eq!(calls, 5, "未命中时逐前缀测量");
-        let _ = line_prefix("hello", &cs, &mut |_| { calls += 1; 10.0 }, &mut widths);
+        let _ = line_prefix(
+            "hello",
+            &cs,
+            &mut |_| {
+                calls += 1;
+                10.0
+            },
+            &mut widths,
+        );
         assert_eq!(calls, 5, "命中缓存后不再测量");
     }
 
@@ -1145,5 +1183,70 @@ mod tests {
         let lay = st.layout.borrow();
         let spans: Vec<(usize, usize)> = lay.rows.iter().map(|r| (r.start, r.end)).collect();
         assert_eq!(spans, vec![(0, 1), (1, 2), (3, 4), (4, 5)]);
+    }
+
+    /// CJK（多字节字符）折行：按字符列而非字节下标折，宽表仍按字符计数。
+    #[test]
+    fn wrap_cjk_no_panic_and_partition() {
+        let cs: Vec<char> = "中文文本段落".chars().collect(); // 6 字符
+        let rows = SelectText::wrap_line(&cs, 0, &mono_prefix(6), 30.0);
+        assert_eq!(rows.len(), 2);
+        assert_eq!((rows[0].start, rows[0].end), (0, 3));
+        assert_eq!((rows[1].start, rows[1].end), (3, 6));
+        assert_partition("中文文本段落", &rows, 6, 30.0);
+    }
+
+    /// 空文本 rebuild：产出单个空显示行，total = 0，不 panic。
+    #[test]
+    fn rebuild_empty_text() {
+        let st = SelectText::new(signal(String::new()));
+        let ts = TextStyle::new(14.0);
+        st.rebuild(19.6, 1.0, 300, &ts, |p| (p.chars().count() as f32) * 10.0);
+        let lay = st.layout.borrow();
+        assert_eq!(lay.total, 0);
+        assert_eq!(lay.rows.len(), 1, "空文本仍有一行（空显示行）");
+        assert_eq!(lay.rows[0].x, vec![0.0]);
+    }
+
+    /// 文本以 '\n' 结尾 → 补一个空显示行（与输入框一致的切分语义）。
+    #[test]
+    fn rebuild_trailing_newline_gets_empty_row() {
+        let st = SelectText::new(signal(String::from("ab\n")));
+        let ts = TextStyle::new(14.0);
+        st.rebuild(19.6, 1.0, 300, &ts, |p| (p.chars().count() as f32) * 10.0);
+        let lay = st.layout.borrow();
+        assert_eq!(lay.total, 3);
+        assert_eq!(lay.rows.len(), 2, "trailing \\n 产生文末空行");
+        assert_eq!((lay.rows[1].start, lay.rows[1].end), (3, 3));
+    }
+
+    /// 宽度缓存按条数兜底：超上限整体清空，不无限膨胀。
+    #[test]
+    fn width_cache_capped_by_entries() {
+        let st = SelectText::new(signal(String::new()));
+        let ts = TextStyle::new(14.0);
+        // 借 rebuild 的缓存清理路径：直接灌满缓存再触发一次 rebuild。
+        {
+            let mut lay = st.layout.borrow_mut();
+            for i in 0..=WIDTH_CACHE_MAX_ENTRIES {
+                lay.widths.insert(format!("line-{i}"), vec![0.0; i % 5 + 1]);
+            }
+        }
+        let ts2 = TextStyle::new(15.0); // 换度量指纹 → 强制走 rebuild 路径
+        st.rebuild(19.6, 1.0, 300, &ts2, |p| (p.chars().count() as f32) * 10.0);
+        // 指纹变化时缓存即清空；条数兜底是第二道防线（针对同指纹下不断涌入新行）。
+        assert!(st.layout.borrow().widths.len() <= WIDTH_CACHE_MAX_ENTRIES);
+        let _ = ts; // 度量指纹按 (字族, 字号, scale) 计算
+    }
+
+    /// 窄盒 + 超宽 CJK 首字符：保底前进一列，不死循环。
+    #[test]
+    fn wrap_oversized_cjk_first_char_terminates() {
+        // 每字符宽 100，盒 50 → 首字符即超宽。
+        let cs: Vec<char> = "中文".chars().collect();
+        let prefix: Vec<f32> = (0..=2).map(|j| j as f32 * 100.0).collect();
+        let rows = SelectText::wrap_line(&cs, 0, &prefix, 50.0);
+        assert_eq!(rows.len(), 2, "每行保底 1 字符，恰好终止");
+        assert_partition("中文", &rows, 2, 50.0);
     }
 }
