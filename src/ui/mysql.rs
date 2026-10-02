@@ -9,7 +9,7 @@ use std::rc::Rc;
 
 use windui::prelude::*;
 
-use super::{icons, sink, sql, table};
+use super::{icons, sink_opt, sql, table};
 use crate::core;
 use crate::core::db::DbSource;
 use crate::core::mysql::MySqlSource;
@@ -43,13 +43,10 @@ pub struct MySqlUi {
     pub table_meta: Signal<Vec<core::db::TablePage>>,
     pub table_rows: Signal<Vec<Vec<String>>>,
     pub table_title: Signal<String>,
-    pub status: Signal<String>,
-    pub error: Signal<String>,
     pub show_sql: Signal<bool>,
     /// 列设置弹窗显隐
     pub show_cols: Signal<bool>,
     pub sql_query: Signal<String>,
-    pub sql_status: Signal<String>,
     pub table_loading: Signal<bool>,
     /// 排队的表加载请求（节流防连点）：(库, 表, 偏移)
     pub pending: Signal<Option<(String, String, usize)>>,
@@ -80,12 +77,9 @@ impl MySqlUi {
             table_meta: signal(Vec::new()),
             table_rows: signal(Vec::new()),
             table_title: signal(lang::DT_TABLE_LIST(0)),
-            status: signal(String::new()),
-            error: signal(String::new()),
             show_sql: signal(false),
             show_cols: signal(false),
             sql_query: signal(String::new()),
-            sql_status: signal(String::new()),
             table_loading: signal(false),
             pending: signal(None),
             export_progress: signal(Vec::new()),
@@ -97,12 +91,8 @@ impl MySqlUi {
         *self.tx.borrow_mut() = Some(tx);
     }
 
-    pub fn tx(&self) -> Sender<core::db::DbMsg> {
-        self.tx
-            .borrow()
-            .as_ref()
-            .expect("mysql tx 已在 run() 中回填")
-            .clone()
+    pub fn tx(&self) -> Option<Sender<core::db::DbMsg>> {
+        self.tx.borrow().clone()
     }
 
     /// 当前连接参数：取选中库址（无库址返回空配置——连接按钮此时已禁用）
@@ -135,9 +125,6 @@ impl MySqlUi {
             table_meta: self.table_meta,
             table_rows: self.table_rows,
             table_title: self.table_title,
-            status: self.status,
-            error: self.error,
-            sql_status: self.sql_status,
             table_loading: self.table_loading,
             pending: self.pending,
             export_progress: self.export_progress,
@@ -154,11 +141,10 @@ impl MySqlUi {
                     s.table_meta.set(Vec::new());
                     s.table_rows.set(Vec::new());
                     s.table_title.set(lang::DT_TABLE_LIST(table_count));
-                    s.error.set(String::new());
-                    s.status.set(lang::MYSQL_CONNECTED(count));
+                    super::toast::ok(lang::MYSQL_CONNECTED(count));
                     let _ = disp;
                 }
-                Err(e) => s.error.set(e),
+                Err(e) => super::toast::err(e),
             }),
             make_db_source: {
                 let ui = self.clone();
@@ -196,11 +182,8 @@ pub fn build_mysql_tab(ui: &MySqlUi) -> (Element, Element, Element) {
         table_meta,
         table_rows,
         table_title,
-        status,
-        error,
         show_sql,
         sql_query,
-        sql_status,
         table_loading,
         pending,
         export_progress,
@@ -239,15 +222,35 @@ pub fn build_mysql_tab(ui: &MySqlUi) -> (Element, Element, Element) {
         .child(
             Element::button(lang::MYSQL_CONN_MGR())
                 .neutral()
-                .icon_content(icons::stateful_icon(icons::SERVER, Some(16)))
+                .icon_content(icons::stateful_icon(icons::SERVER))
                 .small()
-                .on_click(move |_| site_mgr_show.set(true)),
+                .on_click({
+                    // 默认进入即新建态：表单填示例数据，可直接改后保存
+                    let (show, id, name, site_host, site_port, site_user, site_pass) = (
+                        site_mgr_show,
+                        ui.site_edit_id,
+                        ui.site_name,
+                        ui.site_host,
+                        ui.site_port,
+                        ui.site_user,
+                        ui.site_pass,
+                    );
+                    move |_| {
+                        id.set(0);
+                        name.set("示例库址".to_string());
+                        site_host.set("127.0.0.1".to_string());
+                        site_port.set("3306".to_string());
+                        site_user.set("root".to_string());
+                        site_pass.set(String::new());
+                        show.set(true);
+                    }
+                }),
         )
         .child(
             // 连接（未连接时显示）：参数取自选中库址，无库址则禁用
             Element::button(lang::TURSO_CONNECT())
                 .neutral()
-                .icon_content(icons::stateful_icon(icons::PLUG, Some(16)))
+                .icon_content(icons::stateful_icon(icons::PLUG))
                 .small()
                 .visible_when(move || !connected.get())
                 .enabled_when(move || !sites.get().is_empty())
@@ -256,7 +259,10 @@ pub fn build_mysql_tab(ui: &MySqlUi) -> (Element, Element, Element) {
                     let ui_c = ui.clone();
                     move |_| {
                         let src = ui_c.selected_source();
-                        core::db::spawn_connect_grouped(sink(tx_c.clone()), DbSource::MySql(src));
+                        core::db::spawn_connect_grouped(
+                            sink_opt(tx_c.clone()),
+                            DbSource::MySql(src),
+                        );
                     }
                 }),
         )
@@ -264,7 +270,7 @@ pub fn build_mysql_tab(ui: &MySqlUi) -> (Element, Element, Element) {
             // 断开（已连接时显示）
             Element::button(lang::TURSO_DISCONNECT())
                 .neutral()
-                .icon_content(icons::stateful_icon(icons::PLUG, Some(16)))
+                .icon_content(icons::stateful_icon(icons::PLUG))
                 .small()
                 .visible_when(move || connected.get())
                 .on_click(move |_| {
@@ -277,15 +283,13 @@ pub fn build_mysql_tab(ui: &MySqlUi) -> (Element, Element, Element) {
                     table_rows.set(Vec::new());
                     table_title.set(lang::DT_TABLE_LIST(0));
                     show_sql.set(false);
-                    status.set(String::new());
-                    error.set(String::new());
                 }),
         )
         .child(
             // SQL 面板开关
             Element::button(lang::TURSO_OPEN_SQL())
                 .neutral()
-                .icon_content(icons::stateful_icon(icons::TERMINAL, Some(16)))
+                .icon_content(icons::stateful_icon(icons::TERMINAL))
                 .small()
                 .enabled_signal(connected)
                 .on_click(move |_| show_sql.set(!show_sql.get())),
@@ -296,22 +300,12 @@ pub fn build_mysql_tab(ui: &MySqlUi) -> (Element, Element, Element) {
             let show_cols = ui.show_cols;
             Element::button(lang::DT_COLS())
                 .neutral()
-                .icon_content(icons::stateful_icon(icons::TABLE_ICON, Some(16)))
+                .icon_content(icons::stateful_icon(icons::TABLE_ICON))
                 .small()
                 .enabled_when(move || connected.get() && !selected_key.get().is_empty())
                 .on_click(move |_| show_cols.set(!show_cols.get()))
         })
-        .child(Element::flex_spacer())
-        .child(
-            Element::label_signal(error)
-                .font_size(11.0)
-                .fg_role(Role::Danger),
-        )
-        .child(
-            Element::label_signal(status)
-                .font_size(11.0)
-                .fg_role(Role::TextMuted),
-        );
+        .child(Element::flex_spacer());
 
     // ── 左侧分级列表：点击表 → 节流加载 ──
     let table_list = table::render_grouped_table_list(groups, selected_key, expanded, {
@@ -325,7 +319,13 @@ pub fn build_mysql_tab(ui: &MySqlUi) -> (Element, Element, Element) {
                 return;
             }
             table_loading.set(true);
-            core::db::spawn_load_table_grouped(sink(tx_c.clone()), ui2.make_db_source(), g, t, 0);
+            core::db::spawn_load_table_grouped(
+                sink_opt(tx_c.clone()),
+                ui2.make_db_source(),
+                g,
+                t,
+                0,
+            );
         }
     });
 
@@ -333,6 +333,72 @@ pub fn build_mysql_tab(ui: &MySqlUi) -> (Element, Element, Element) {
     let data_table = table::render_data_table(table_meta, table_rows);
     let page_bar_tx = tx.clone();
     let ui_pb = ui.clone(); // page_bar 闭包独占一份，内部回调再各自克隆
+
+    // 导出整库结构 DDL（无进度：DDL 量小，通常秒级完成）。
+    // 紧凑图标按钮：挂表列表标题行右端，tooltip 说明用途。
+    // 定义在 page_bar 闭包外：标题行在外层作用域，闭包内定义取不到；
+    // 当前库分组从 table_meta 的表名（"库.表"）即时拆出
+    let ddl_tx = page_bar_tx.clone();
+    let ui_ddl = ui.clone();
+    let export_ddl = Element::button(String::new())
+        .small()
+        .neutral()
+        .outline_soft()
+        .icon_content(icons::stateful_icon(icons::EXPORT))
+        .tooltip(lang::DT_EXPORT_SCHEMA_TITLE())
+        // 必须已选库（选中表后 table_meta 才有 table_name）：未选库禁用，
+        // 避免空分组导出整个实例的复杂行为
+        .enabled_when(move || {
+            !table_loading.get()
+                && export_progress.get().is_empty()
+                && table_meta
+                    .get()
+                    .first()
+                    .and_then(|p| p.table_name.as_ref())
+                    .is_some()
+        })
+        .on_click(move |ctx| {
+            let g = table_meta
+                .get()
+                .first()
+                .map(|p| {
+                    p.table_name
+                        .as_deref()
+                        .unwrap_or("")
+                        .split('.')
+                        .next()
+                        .unwrap_or("")
+                        .to_string()
+                })
+                .unwrap_or_default();
+            let (tx_c, ui_c, g_c) = (ddl_tx.clone(), ui_ddl.clone(), g);
+            ctx.request_save_file(
+                PickDialog::new()
+                    .title(lang::DT_EXPORT_SCHEMA_TITLE())
+                    .filter("SQL", &["sql"])
+                    .file_name(format!("{}_schema.sql", g_c)),
+                move |path: Option<PathBuf>| {
+                    if let Some(dest) = path {
+                        let dest = if dest
+                            .extension()
+                            .map(|e| e.eq_ignore_ascii_case("sql"))
+                            .unwrap_or(false)
+                        {
+                            dest
+                        } else {
+                            dest.with_extension("sql")
+                        };
+                        core::db::spawn_export_schema(
+                            sink_opt(tx_c),
+                            ui_c.make_db_source(),
+                            g_c,
+                            dest,
+                        );
+                    }
+                },
+            )
+        });
+
     let page_bar = Element::host_signal(table_meta, move |t: core::db::TablePage| {
         let ui = ui_pb.clone(); // host_signal 闭包是 Fn：每次重建克隆一份供内部回调
         if t.selected_row.is_some() {
@@ -364,7 +430,7 @@ pub fn build_mysql_tab(ui: &MySqlUi) -> (Element, Element, Element) {
                 }
                 loading.set(true);
                 core::db::spawn_load_table_grouped(
-                    sink(tx.clone()),
+                    sink_opt(tx.clone()),
                     ui2.make_db_source(),
                     g.clone(),
                     tb.clone(),
@@ -423,7 +489,48 @@ pub fn build_mysql_tab(ui: &MySqlUi) -> (Element, Element, Element) {
                                 dest.with_extension("csv")
                             };
                             core::db::spawn_export_csv_grouped(
-                                sink(tx_c),
+                                sink_opt(tx_c),
+                                ui_c.make_db_source(),
+                                g_c,
+                                t_c,
+                                dest,
+                            );
+                        }
+                    },
+                );
+            });
+
+        // 导出单表 SQL INSERT（分批流式，进度同 CSV 通道）
+        let sql_tx = page_bar_tx.clone();
+        let ui4 = ui.clone();
+        let (sg, st) = (g.clone(), tb.clone());
+        let export_sql = Element::button(lang::DT_EXPORT_SQL())
+            .small()
+            .neutral()
+            .outline_soft()
+            .enabled_when(move || !table_loading.get() && export_progress.get().is_empty())
+            .on_click(move |ctx| {
+                let tx_c = sql_tx.clone();
+                let ui_c = ui4.clone();
+                let (g_c, t_c) = (sg.clone(), st.clone());
+                ctx.request_save_file(
+                    PickDialog::new()
+                        .title(lang::DT_EXPORT_TITLE())
+                        .filter("SQL", &["sql"])
+                        .file_name(format!("{}.sql", t_c)),
+                    move |path: Option<PathBuf>| {
+                        if let Some(dest) = path {
+                            let dest = if dest
+                                .extension()
+                                .map(|e| e.eq_ignore_ascii_case("sql"))
+                                .unwrap_or(false)
+                            {
+                                dest
+                            } else {
+                                dest.with_extension("sql")
+                            };
+                            core::db::spawn_export_sql(
+                                sink_opt(tx_c),
                                 ui_c.make_db_source(),
                                 g_c,
                                 t_c,
@@ -467,8 +574,23 @@ pub fn build_mysql_tab(ui: &MySqlUi) -> (Element, Element, Element) {
             )
             .child(next)
             .child(export)
+            .child(export_sql)
             .child(progress_row)
     });
+
+    // SQL 查询面板 + 查询管理弹窗（弹窗由调用方挂根层级，遮罩铺满整窗）
+    let (sql_panel_el, sql_mgr) = sql::render_sql_panel(
+        sql_query,
+        connected,
+        {
+            let ui2 = ui.clone();
+            move || ui2.make_db_source()
+        },
+        tx,
+        LexerKind::SqlMySql,
+        "mysql",
+    );
+    let sql_panel_el = sql_panel_el.visible_when(move || show_sql.get());
 
     let page = Element::col()
         .padding(12)
@@ -482,6 +604,7 @@ pub fn build_mysql_tab(ui: &MySqlUi) -> (Element, Element, Element) {
                 .child(
                     Element::col()
                         .width(210)
+                        .height_match()
                         .spacing(4)
                         .child(
                             Element::row()
@@ -492,11 +615,13 @@ pub fn build_mysql_tab(ui: &MySqlUi) -> (Element, Element, Element) {
                                 .padding_xy(4, 0)
                                 .child(
                                     Element::image_content(
-                                        ImageContent::from_svg_bytes(icons::TABLE_ICON, Some(14))
-                                            .tint(
-                                                Role::TextMuted.resolve(&windui::theme::current()),
-                                            ),
+                                        ImageContent::from_svg_bytes(icons::TABLE_ICON, None).tint(
+                                            Role::TextMuted.resolve(&windui::theme::current()),
+                                        ),
                                     )
+                                    // 矢量源固有 24dp：钉回原 Some(14) 的逻辑尺寸
+                                    .width(14)
+                                    .height(14)
                                     .align(Align::Center),
                                 )
                                 .child(
@@ -506,12 +631,18 @@ pub fn build_mysql_tab(ui: &MySqlUi) -> (Element, Element, Element) {
                                         .fg_role(Role::TextMuted)
                                         .max_lines(1)
                                         .weight(1.0),
-                                ),
+                                )
+                                .child(export_ddl),
                         )
+                        // 卡片容器收住列表：height_match 会按父整高分配、加标题行
+                        // 后底部穿出窗体，须用 weight 占剩余高度
                         .child(
                             Element::scroll()
                                 .width_match()
-                                .height_match()
+                                .weight(1.0)
+                                .bg_role(Role::SurfaceAlt)
+                                .corner(8.0)
+                                .padding(6)
                                 .child(table_list.weight(1.0)),
                         ),
                 )
@@ -528,21 +659,7 @@ pub fn build_mysql_tab(ui: &MySqlUi) -> (Element, Element, Element) {
                         .child(page_bar),
                 ),
         )
-        .child(
-            sql::render_sql_panel(
-                sql_query,
-                sql_status,
-                connected,
-                {
-                    let ui2 = ui.clone();
-                    move || ui2.make_db_source()
-                },
-                tx,
-                LexerKind::SqlMySql,
-                "mysql",
-            )
-            .visible_when(move || show_sql.get()),
-        );
+        .child(sql_panel_el);
 
     // 列勾选弹窗：列出所有列，点击行切换该列显示/隐藏（meta 驱动同步刷新）
     let col_body = Element::host_signal(table_meta, move |t: core::db::TablePage| {
@@ -607,8 +724,17 @@ pub fn build_mysql_tab(ui: &MySqlUi) -> (Element, Element, Element) {
             ),
     );
 
-    // 列选择弹窗由调用方挂根层级：ModalScrim 遮罩铺满根节点，模态覆盖整窗
-    (page, col_dialog, build_mysql_site_mgr(&ui))
+    // 列选择弹窗由调用方挂根层级：ModalScrim 遮罩铺满根节点，模态覆盖整窗。
+    // 容器必须 stack（fill）：col 会让首个 fill 子吃掉全部高度，弹窗拿不到尺寸、
+    // 遮罩不铺满全窗
+    (
+        page,
+        col_dialog,
+        Element::stack()
+            .fill()
+            .child(build_mysql_site_mgr(&ui))
+            .child(sql_mgr),
+    )
 }
 
 /// MySQL 站点管理弹窗：单层双栏（左站点列表 + 右表单），保存/删除同层完成

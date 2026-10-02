@@ -50,7 +50,7 @@ pub(super) fn cmd_window(ui: &SftpUi) -> Element {
     let exec_btn = Element::button(lang::SFTP_CMD_EXEC())
         .small()
         .neutral()
-        .icon_content(icons::stateful_icon(icons::TERMINAL, Some(16)))
+        .icon_content(icons::stateful_icon(icons::TERMINAL))
         .enabled_when(move || {
             connected.get() && !cmd_input.get().trim().is_empty() && !cmd_running.get()
         })

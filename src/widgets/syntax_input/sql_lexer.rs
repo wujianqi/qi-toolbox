@@ -653,7 +653,7 @@ mod tests {
             .filter(|t| t.kind == SqlTokenKind::Keyword)
             .map(|t| t.text)
             .collect();
-        assert!(kws.contains(&"jsonb_col") == false);
+        assert!(!kws.contains(&"jsonb_col"));
         assert!(kws.contains(&"ILIKE"));
         assert!(kws.contains(&"FROM"));
         // 基线方言下 ILIKE 不是关键字

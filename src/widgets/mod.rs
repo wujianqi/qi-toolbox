@@ -4,7 +4,10 @@ mod layout_hint;
 mod sel_core;
 mod select_text;
 pub mod syntax_input;
+#[allow(clippy::module_inception)] // widgets/widgets.rs：与业务无关的基础控件实现体
 mod widgets;
+
+pub mod calendar;
 
 // 公共导出：部分符号当前仅被 widgets 内部/单测使用，保留导出便于扩展
 #[allow(unused_imports)]
@@ -16,7 +19,8 @@ pub use select_text::SelectText;
 #[allow(unused_imports)]
 pub use syntax_input::{LexerKind, SyntaxInput};
 #[allow(unused_imports)]
+pub use calendar::{calendar_panel, days_in_month, weekday_of_first};
 pub use widgets::{
     card, input_dialog, mgr_dialog, mgr_form_col, mgr_list_col, pick_dir, pick_file, save_qr_png,
-    select_text, write_png,
+    select_text,
 };

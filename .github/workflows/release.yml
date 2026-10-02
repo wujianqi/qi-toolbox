@@ -1,0 +1,27 @@
+name: Release
+
+on:
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    name: 发布构建（Windows x64）
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo build --release
+      - name: 收集产物
+        shell: pwsh
+        run: |
+          $ver = "${{ github.ref_name }}"
+          Copy-Item target/release/qi-toolbox.exe "qi-toolbox-$ver-windows-x64.exe"
+      - name: 上传到 Release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: qi-toolbox-*-windows-x64.exe

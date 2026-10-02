@@ -16,7 +16,7 @@ use crate::widgets::select_text;
 fn about_text_sig() -> Signal<String> {
     use std::cell::RefCell;
     thread_local! {
-        static SIG: RefCell<Option<Signal<String>>> = RefCell::new(None);
+        static SIG: RefCell<Option<Signal<String>>> = const { RefCell::new(None) };
     }
     SIG.with(|v| {
         let mut g = v.borrow_mut();
@@ -25,7 +25,10 @@ fn about_text_sig() -> Signal<String> {
         if !g.as_ref().is_some_and(|s| s.is_alive()) {
             *g = Some(signal(about_text()));
         }
-        g.as_ref().unwrap().clone()
+        // 前一步刚回填，必然可取；用 clone 解包避免 panic 路径
+        g.as_ref()
+            .and_then(|s| s.is_alive().then_some(*s))
+            .unwrap_or_else(|| signal(about_text()))
     })
 }
 
@@ -59,12 +62,15 @@ pub fn nav_item(
             })
             .child(
                 Element::image_content(
-                    ImageContent::from_svg_bytes(icon, Some(14)).tint(if selected {
+                    ImageContent::from_svg_bytes(icon, None).tint(if selected {
                         on_accent
                     } else {
                         muted
                     }),
                 )
+                // 矢量源固有 24dp：钉回原 Some(14) 的逻辑尺寸
+                .width(14)
+                .height(14)
                 .align(Align::Center),
             )
     };
@@ -144,8 +150,8 @@ pub fn theme_toggle(mode: Signal<usize>, th: ThemeHandle, epoch: Signal<Vec<()>>
     let t = windui::theme::current();
     let muted = Role::TextMuted.resolve(&t);
     let dark = mode.get() == 1;
-    let icon = ImageContent::from_svg_bytes(if dark { icons::MOON } else { icons::SUN }, Some(16))
-        .tint(muted);
+    let icon =
+        ImageContent::from_svg_bytes(if dark { icons::MOON } else { icons::SUN }, None).tint(muted);
     Element::stack()
         .clickable()
         .on_click(move |_| {
@@ -162,7 +168,13 @@ pub fn theme_toggle(mode: Signal<usize>, th: ThemeHandle, epoch: Signal<Vec<()>>
         .height(28)
         .corner(6.0)
         .tooltip(lang::TOGGLE_THEME())
-        .child(Element::image_content(icon).align(Align::Center))
+        .child(
+            Element::image_content(icon)
+                // 矢量源固有 24dp：钉回原 Some(16) 的逻辑尺寸
+                .width(16)
+                .height(16)
+                .align(Align::Center),
+        )
 }
 
 /// 关于页大段说明文本（\n 分行，供只读可选文本控件展示与复制）
@@ -203,7 +215,10 @@ pub fn build_about_page() -> Element {
                     .cross(Align::Center)
                     .child(
                         // Logo 自带品牌色，不参与主题染色（ImageContent::tint 会整体染色）
-                        Element::image_content(ImageContent::from_svg_bytes(icons::LOGO, Some(48)))
+                        Element::image_content(ImageContent::from_svg_bytes(icons::LOGO, None))
+                            // 矢量源固有 100dp（viewBox 100×100）：钉回原 Some(48) 的逻辑尺寸
+                            .width(48)
+                            .height(48)
                             .align(Align::Center),
                     )
                     .child(
@@ -242,28 +257,41 @@ pub fn build_about_page() -> Element {
                         .visible_when(move || {
                             matches!(
                                 status.get(),
-                                UpdateStatus::New(_) | UpdateStatus::UpToDate | UpdateStatus::Failed
+                                UpdateStatus::New(_)
+                                    | UpdateStatus::UpToDate
+                                    | UpdateStatus::Failed
                             )
                         }),
                     )
                     .child(
                         Element::link(lang::ABOUT_GOTO_RELEASES())
                             .url("https://github.com/wujianqi/qi-toolbox/releases")
-                            .visible_when(move || {
-                                matches!(status.get(), UpdateStatus::New(_))
-                            }),
+                            .visible_when(move || matches!(status.get(), UpdateStatus::New(_))),
                     )
                     .child(
                         // 手动检查更新：请求在后台线程执行，结果经通道回写状态信号；
                         // 检查中禁用防连点
                         Element::button(lang::ABOUT_CHECK_UPDATE())
                             .neutral()
-                            .icon_content(icons::stateful_icon(icons::REFRESH, Some(14)))
+                            .icon_content(icons::stateful_icon(icons::REFRESH))
                             .small()
                             .enabled_when(move || status.get() != UpdateStatus::Checking)
                             .on_click(move |_| {
                                 status.set(UpdateStatus::Checking);
                                 crate::ui::spawn_update_check();
+                            }),
+                    )
+                    .child(
+                        // 打开日志目录：排查用户反馈问题的第一入口
+                        Element::button(lang::ABOUT_OPEN_LOGS())
+                            .neutral()
+                            .icon_content(icons::stateful_icon(icons::INFO))
+                            .small()
+                            .on_click(|_| {
+                                let dir = crate::core::log::dir();
+                                let _ = std::fs::create_dir_all(&dir);
+                                // Windows 直接唤起资源管理器（避免为打开目录新增依赖）
+                                let _ = std::process::Command::new("explorer").arg(&dir).spawn();
                             }),
                     ),
             )

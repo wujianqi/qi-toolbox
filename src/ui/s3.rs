@@ -42,8 +42,6 @@ pub struct S3Ui {
     pub entries: Signal<Vec<s3::S3Entry>>,
     /// 多选的条目名
     pub selected: Signal<Vec<String>>,
-    pub status: Signal<String>,
-    pub error: Signal<String>,
     pub connected: Signal<bool>,
     /// 新建目录弹窗
     pub mkdir_show: Signal<bool>,
@@ -57,6 +55,8 @@ pub struct S3Ui {
     pub restore_msg: Signal<String>,
     /// 正在从 S3 下载备份（on_msg 收到 Done 时按恢复流程落库）
     pub restoring: Signal<bool>,
+    /// 对象过滤关键字（大小写不敏感子串匹配；空 = 不过滤）
+    pub filter: Signal<String>,
     /// 工作线程命令发送端（run() 中回填）
     cmd: Rc<RefCell<Option<mpsc::Sender<s3::S3Cmd>>>>,
 }
@@ -79,8 +79,6 @@ impl S3Ui {
             prefix: signal(String::new()),
             entries: signal(Vec::new()),
             selected: signal(Vec::new()),
-            status: signal(String::new()),
-            error: signal(String::new()),
             connected: signal(false),
             mkdir_show: signal(false),
             mkdir_name: signal(String::new()),
@@ -90,6 +88,7 @@ impl S3Ui {
             restore_show: signal(false),
             restore_msg: signal(String::new()),
             restoring: signal(false),
+            filter: signal(String::new()),
             cmd: Rc::new(RefCell::new(None)),
         }
     }
@@ -99,11 +98,11 @@ impl S3Ui {
     }
 
     pub fn cmd(&self) -> mpsc::Sender<s3::S3Cmd> {
+        // 未回填时给一条哑通道兜底：发送静默失败，不 panic
         self.cmd
             .borrow()
-            .as_ref()
-            .expect("s3 cmd 已在 run() 中回填")
             .clone()
+            .unwrap_or_else(|| mpsc::channel().0)
     }
 
     /// 当前选中站点的连接凭据（未选/表空返回 None）
@@ -127,12 +126,11 @@ impl S3Ui {
                 self.entries.set(list);
                 self.selected.set(Vec::new());
                 self.connected.set(true);
-                self.error.set(String::new());
             }
             s3::S3Msg::Listed(Err(e)) => {
                 self.connected.set(false);
                 self.entries.set(Vec::new());
-                self.error.set(e);
+                super::toast::err(e);
             }
             s3::S3Msg::Done(Ok(s)) => {
                 // 恢复流程：下载完成的产物是 store.db 备份，覆盖本地库而非普通下载提示
@@ -146,17 +144,16 @@ impl S3Ui {
                     };
                     let db = crate::core::store::db_path();
                     match std::fs::copy(&path, &db) {
-                        Ok(_) => self.status.set(lang::S3_RESTORE_OK(&path)),
-                        Err(e) => self.error.set(format!("restore: {}", e)),
+                        Ok(_) => super::toast::ok(lang::S3_RESTORE_OK(&path)),
+                        Err(e) => super::toast::err(format!("restore: {}", e)),
                     }
                     return;
                 }
-                self.status.set(s);
-                self.error.set(String::new());
+                super::toast::ok(s);
                 // 变更类操作成功后刷新当前目录
                 self.refresh();
             }
-            s3::S3Msg::Done(Err(e)) => self.error.set(e),
+            s3::S3Msg::Done(Err(e)) => super::toast::err(e),
         }
     }
 
@@ -182,11 +179,8 @@ pub fn build_s3_tab(ui: &S3Ui) -> (Element, Element) {
     let sites = ui.sites;
     let site_sel = ui.site_sel;
     let prefix = ui.prefix;
-    let entries = ui.entries;
     let selected = ui.selected;
     let connected = ui.connected;
-    let status = ui.status;
-    let error = ui.error;
 
     // ── 站点管理：下拉 + 新建/编辑/删除 ──
     let site_opts = site_sel.map(move |idx| {
@@ -234,19 +228,40 @@ pub fn build_s3_tab(ui: &S3Ui) -> (Element, Element) {
         .small()
         .neutral()
         .on_click({
-            let ui = ui.clone();
-            move |_| ui.site_mgr_show.set(true)
+            // 默认进入即新建态：表单填示例数据，可直接改后保存
+            let (show, id, name, endpoint, region) = (
+                ui.site_mgr_show,
+                ui.site_edit_id,
+                ui.site_name,
+                ui.site_endpoint,
+                ui.site_region,
+            );
+            let (bucket, access, secret, path_style) = (
+                ui.site_bucket,
+                ui.site_access,
+                ui.site_secret,
+                ui.site_path_style,
+            );
+            move |_| {
+                id.set(0);
+                name.set("示例站点".to_string());
+                endpoint.set("https://s3.example.com".to_string());
+                region.set(String::new());
+                bucket.set("my-bucket".to_string());
+                access.set(String::new());
+                secret.set(String::new());
+                path_style.set(0);
+                show.set(true);
+            }
         });
     // 打开站点：先验证连通（列根目录），成功才视为已连接
     let btn_open = Element::button(lang::S3_OPEN())
         .small()
-        .icon_content(icons::stateful_icon(icons::PLUG, Some(16)))
+        .icon_content(icons::stateful_icon(icons::PLUG))
         .on_click({
             let ui = ui.clone();
             let cmd = cmd.clone();
             move |_| {
-                status.set(String::new());
-                error.set(String::new());
                 if let Some(cred) = ui.cred() {
                     let _ = cmd.send(s3::S3Cmd::List {
                         cred,
@@ -260,7 +275,7 @@ pub fn build_s3_tab(ui: &S3Ui) -> (Element, Element) {
     let bak_btn = Element::button(lang::S3_BAK())
         .small()
         .neutral()
-        .icon_content(icons::stateful_icon(icons::SAVE, Some(16)))
+        .icon_content(icons::stateful_icon(icons::SAVE))
         .enabled_signal(connected)
         .on_click({
             let ui = ui.clone();
@@ -274,16 +289,16 @@ pub fn build_s3_tab(ui: &S3Ui) -> (Element, Element) {
                             key,
                             local: snap.to_string_lossy().into_owned(),
                         });
-                        ui.status.set(lang::S3_UPLOADING().to_string());
+                        super::toast::info(lang::S3_UPLOADING());
                     }
                 }
-                Err(e) => ui.error.set(e),
+                Err(e) => super::toast::err(e),
             }
         });
     let restore_btn = Element::button(lang::S3_RESTORE())
         .small()
         .neutral()
-        .icon_content(icons::stateful_icon(icons::REFRESH, Some(16)))
+        .icon_content(icons::stateful_icon(icons::REFRESH))
         .enabled_when(move || connected.get() && !selected.get().is_empty())
         .on_click({
             let ui = ui.clone();
@@ -298,7 +313,7 @@ pub fn build_s3_tab(ui: &S3Ui) -> (Element, Element) {
                         .map(|e| !e.is_dir && e.name.ends_with(".db"))
                         .unwrap_or(false)
                 }) else {
-                    ui.error.set(lang::S3_DIR_TAG()); // 占位不可达：enabled_when 已保证选中
+                    super::toast::err(lang::S3_DIR_TAG()); // 占位不可达：enabled_when 已保证选中
                     return;
                 };
                 ui.restore_msg.set(lang::S3_RESTORE_CONFIRM(name));
@@ -319,7 +334,7 @@ pub fn build_s3_tab(ui: &S3Ui) -> (Element, Element) {
     let up = Element::button(lang::S3_UP())
         .small()
         .neutral()
-        .icon_content(icons::stateful_icon(icons::ARROW_LEFT, Some(16)))
+        .icon_content(icons::stateful_icon(icons::ARROW_LEFT))
         .enabled_signal(connected)
         .on_click({
             let ui = ui.clone();
@@ -334,7 +349,7 @@ pub fn build_s3_tab(ui: &S3Ui) -> (Element, Element) {
     let refresh = Element::button(lang::S3_REFRESH())
         .small()
         .neutral()
-        .icon_content(icons::stateful_icon(icons::REFRESH, Some(16)))
+        .icon_content(icons::stateful_icon(icons::REFRESH))
         .enabled_signal(connected)
         .on_click({
             let ui = ui.clone();
@@ -343,7 +358,7 @@ pub fn build_s3_tab(ui: &S3Ui) -> (Element, Element) {
     let upload_btn = Element::button(lang::S3_UPLOAD())
         .small()
         .neutral()
-        .icon_content(icons::stateful_icon(icons::UPLOAD, Some(16)))
+        .icon_content(icons::stateful_icon(icons::UPLOAD))
         .enabled_signal(connected)
         .on_click({
             let ui = ui.clone();
@@ -359,7 +374,7 @@ pub fn build_s3_tab(ui: &S3Ui) -> (Element, Element) {
                             key,
                             local: file,
                         });
-                        ui.status.set(lang::S3_UPLOADING().to_string());
+                        super::toast::info(lang::S3_UPLOADING());
                     }
                 }
             }
@@ -367,7 +382,7 @@ pub fn build_s3_tab(ui: &S3Ui) -> (Element, Element) {
     let download_btn = Element::button(lang::S3_DOWNLOAD())
         .small()
         .neutral()
-        .icon_content(icons::stateful_icon(icons::DOWNLOAD, Some(16)))
+        .icon_content(icons::stateful_icon(icons::DOWNLOAD))
         .enabled_when(move || connected.get() && !selected.get().is_empty())
         .on_click({
             let ui = ui.clone();
@@ -392,13 +407,45 @@ pub fn build_s3_tab(ui: &S3Ui) -> (Element, Element) {
                         }
                     }
                 }
-                ui.status.set(lang::S3_DOWNLOADING().to_string());
+                super::toast::info(lang::S3_DOWNLOADING());
+            }
+        });
+    // ── 预签名 URL：选中单个文件生成 1 小时有效的下载直链并复制 ──
+    let presign_btn = Element::button(lang::S3_PRESIGN())
+        .small()
+        .neutral()
+        .icon_content(icons::stateful_icon(icons::LINK))
+        .enabled_when(move || connected.get() && selected.get().len() == 1)
+        .on_click({
+            let ui = ui.clone();
+            move |ctx| {
+                let Some(e) = ui
+                    .entries
+                    .get()
+                    .iter()
+                    .find(|e| ui.selected.get().first() == Some(&e.name))
+                    .cloned()
+                else {
+                    return;
+                };
+                if e.is_dir {
+                    return;
+                }
+                let Some(cred) = ui.cred() else { return };
+                let key = s3::join_key(&ui.prefix.get(), &e.name, false);
+                match s3::presign_get(&cred, &key) {
+                    Ok(url) => {
+                        ctx.clipboard_set(&url);
+                        super::toast::ok(lang::S3_PRESIGN_DONE());
+                    }
+                    Err(er) => super::toast::err(er),
+                }
             }
         });
     let mkdir_btn = Element::button(lang::S3_MKDIR())
         .small()
         .neutral()
-        .icon_content(icons::stateful_icon(icons::FOLDER, Some(16)))
+        .icon_content(icons::stateful_icon(icons::FOLDER))
         .enabled_signal(connected)
         .on_click({
             let ui = ui.clone();
@@ -410,7 +457,7 @@ pub fn build_s3_tab(ui: &S3Ui) -> (Element, Element) {
     let del_btn = Element::button(lang::S3_DELETE())
         .small()
         .neutral()
-        .icon_content(icons::stateful_icon(icons::TRASH, Some(16)))
+        .icon_content(icons::stateful_icon(icons::TRASH))
         .enabled_when(move || connected.get() && !selected.get().is_empty())
         .on_click({
             let ui = ui.clone();
@@ -441,8 +488,11 @@ pub fn build_s3_tab(ui: &S3Ui) -> (Element, Element) {
         .child(refresh)
         .child(upload_btn)
         .child(download_btn)
+        .child(presign_btn)
         .child(mkdir_btn)
-        .child(del_btn);
+        .child(del_btn)
+        // 过滤输入框：本地子串过滤当前列表
+        .child(Element::text_input(ui.filter, lang::S3_FILTER_HINT()).width(160));
 
     // ── 路径行：bucket + 当前前缀 ──
     let ui_label = ui.clone();
@@ -468,17 +518,24 @@ pub fn build_s3_tab(ui: &S3Ui) -> (Element, Element) {
                 .font_size(12.0)
                 .fg_role(Role::TextMuted),
         )
-        .child(Element::flex_spacer())
-        .child(
-            Element::label_signal(status)
-                .font_size(11.0)
-                .fg_role(Role::Accent),
-        )
-        .child(
-            Element::label_signal(error)
-                .font_size(11.0)
-                .fg_role(Role::Danger),
-        );
+        .child(Element::flex_spacer());
+
+    // ── 过滤关键字 → 本地过滤后的条目列表（map 派生信号；大小写不敏感子串匹配，
+    // 闭包内读 entries 使其成为依赖，条目刷新时同步重算）──
+    let filtered = {
+        let entries = ui.entries;
+        ui.filter.map(move |kw: &String| {
+            let kw = kw.to_lowercase();
+            let list = entries.get();
+            if kw.is_empty() {
+                list
+            } else {
+                list.into_iter()
+                    .filter(|e| e.name.to_lowercase().contains(&kw))
+                    .collect()
+            }
+        })
+    };
 
     // ── 文件列表：单行条目（目录点击进入；文件点击多选）──
     // ui/cmd 先克隆出列表专用副本，避免函数参数引用逃逸进闭包
@@ -491,7 +548,7 @@ pub fn build_s3_tab(ui: &S3Ui) -> (Element, Element) {
         .bg_role(Role::SurfaceAlt)
         .child(
             Element::list_signal(
-                entries,
+                filtered,
                 |e: &s3::S3Entry| e.name.clone(),
                 move |e: s3::S3Entry| {
                     let name = e.name.clone();
@@ -536,10 +593,12 @@ pub fn build_s3_tab(ui: &S3Ui) -> (Element, Element) {
                             }
                         })
                         // 彩色素材自带配色，直接解析，不参与主题染色
-                        .child(Element::image_content(ImageContent::from_svg_bytes(
-                            icon,
-                            Some(14),
-                        )))
+                        .child(
+                            Element::image_content(ImageContent::from_svg_bytes(icon, None))
+                                // 矢量源固有 24dp：钉回原 Some(14) 的逻辑尺寸
+                                .width(14)
+                                .height(14),
+                        )
                         .child(
                             Element::label(label_name)
                                 .font_size(13.0)
@@ -552,6 +611,16 @@ pub fn build_s3_tab(ui: &S3Ui) -> (Element, Element) {
                             Element::label(size_txt)
                                 .font_size(11.0)
                                 .fg_role(Role::TextMuted),
+                        )
+                        // 修改日期（目录/未返回不显示）
+                        .child(
+                            Element::label(if e.mtime > 0 {
+                                crate::core::fmt::format_date(e.mtime)
+                            } else {
+                                String::new()
+                            })
+                            .font_size(11.0)
+                            .fg_role(Role::TextMuted),
                         )
                 },
             )
@@ -1019,7 +1088,7 @@ pub fn build_s3_tab(ui: &S3Ui) -> (Element, Element) {
                                 local_dir: std::env::temp_dir().to_string_lossy().into_owned(),
                             });
                             res_ui.restoring.set(true);
-                            res_ui.status.set(lang::S3_DOWNLOADING().to_string());
+                            super::toast::info(lang::S3_DOWNLOADING());
                         }
                     }),
             ),
@@ -1071,7 +1140,7 @@ fn chrono_now_stamp() -> String {
     format!("{:04}{:02}{:02}-{:02}{:02}{:02}", y, m, d, h, mi, s)
 }
 
-/// PNG 保存对话框复用 [`crate::widgets`]；文件/目录选择同样走 widgets 共享助手。
+// PNG 保存对话框复用 [`crate::widgets`]；文件/目录选择同样走 widgets 共享助手。
 
 #[cfg(test)]
 mod tests {

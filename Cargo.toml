@@ -7,7 +7,7 @@ panic = "abort"     # 减少 unwind 表
 
 [package]
 name = "qi-toolbox"
-version = "0.2.0"
+version = "0.2.1"
 edition = "2021"
 description = "奇兔宝 (Qi Toolbox) - 2FA验证码、随机密码、数据库浏览(Turso/MySQL/PG)、SFTP/SSH、S3浏览、远程检测"
 license = "MIT"

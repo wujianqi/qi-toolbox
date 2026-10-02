@@ -38,6 +38,25 @@ pub enum DbSource {
     Pg(PgSource),
 }
 
+/// 判断 SQL 是否为写语句（首关键字粗判，只读模式拦截用）。
+/// SELECT / WITH(CTE 查询) / EXPLAIN / SHOW / DESCRIBE / DESC / PRAGMA 视为读，
+/// 其余（INSERT/UPDATE/DELETE/CREATE/DROP/ALTER/TRUNCATE/REPLACE/MERGE/
+/// GRANT/REVOKE/SET/VACUUM/BEGIN/COMMIT/ROLLBACK/CALL/USE…）一律视为写。
+pub fn is_write_sql(sql: &str) -> bool {
+    let first = sql
+        .trim_start()
+        .trim_start_matches('(')
+        .split_whitespace()
+        .next()
+        .unwrap_or("")
+        .trim_end_matches(';')
+        .to_ascii_lowercase();
+    !matches!(
+        first.as_str(),
+        "select" | "with" | "explain" | "show" | "describe" | "desc" | "pragma" | ""
+    )
+}
+
 /// CSV 单元格转义：含逗号/引号/换行的值用双引号包裹，内部引号翻倍；
 /// 公式前缀（= + @ 或负号开头的纯公式）加单引号前缀中和，防电子表格打开时被当公式执行
 pub(crate) fn csv_field(v: &str) -> String {
@@ -62,6 +81,336 @@ pub(crate) fn csv_field(v: &str) -> String {
 
 /// 导出批量大小：每批拉取行数（远大于浏览的 PAGE_SIZE，减少远程往返）
 const EXPORT_BATCH: usize = 2000;
+
+/// SQL 字面量转义：NULL 原样，其余单引号包裹（内部引号翻倍）。
+/// 值均来自后端取数的文本化结果（不可注入来源），仅做 SQL 语法层转义
+pub(crate) fn sql_literal(v: &str) -> String {
+    if v == "NULL" {
+        "NULL".to_string()
+    } else {
+        format!("'{}'", v.replace('\'', "''"))
+    }
+}
+
+/// 单条 INSERT 语句合成（列名已引号包裹，行值经 sql_literal 转义）
+fn insert_stmt(qualified: &str, cols: &[String], row: &[String]) -> String {
+    let vals: Vec<String> = row.iter().map(|v| sql_literal(v)).collect();
+    format!(
+        "INSERT INTO {} ({}) VALUES ({});",
+        qualified,
+        cols.join(", "),
+        vals.join(", ")
+    )
+}
+
+/// 导出统一取行器：keyset 优先（单列主键游标，O(n)），失败/无主键回退 OFFSET。
+/// MySQL/PG 用；Turso 已有 rowid keyset 版。
+enum BatchFetcher {
+    MySql(MySqlViewer, MySqlTableRef),
+    Pg(PgViewer, PgTableRef),
+}
+
+impl BatchFetcher {
+    /// 取下一批：返回 None = 该后端不支持 keyset（走 OFFSET）
+    fn next_batch(
+        &mut self,
+        pk: Option<&str>,
+        cursor: &mut Option<String>,
+        offset: usize,
+        keyset_ok: &mut bool,
+    ) -> Result<Vec<Vec<String>>, String> {
+        match self {
+            BatchFetcher::MySql(v, tref) => match pk {
+                Some(col) if *keyset_ok => {
+                    match v.export_batch_keyset(tref, col, cursor.clone(), EXPORT_BATCH) {
+                        Ok(rows) => {
+                            // 游标推进：取主键列在本批末行的值
+                            if let Some(last) = rows.last() {
+                                if let Some(idx) = v.column_names.iter().position(|c| c == col) {
+                                    *cursor = last.get(idx).cloned();
+                                }
+                            }
+                            Ok(rows)
+                        }
+                        Err(_) => {
+                            *keyset_ok = false;
+                            Ok(Vec::new())
+                        }
+                    }
+                }
+                _ => v.export_batch(tref, offset, EXPORT_BATCH),
+            },
+            BatchFetcher::Pg(v, tref) => match pk {
+                Some(col) if *keyset_ok => {
+                    match v.export_batch_keyset(
+                        &tref.schema,
+                        &tref.table,
+                        col,
+                        cursor.clone(),
+                        EXPORT_BATCH,
+                    ) {
+                        Ok(rows) => {
+                            if let Some(last) = rows.last() {
+                                if let Some(idx) = v.column_names.iter().position(|c| c == col) {
+                                    *cursor = last.get(idx).cloned();
+                                }
+                            }
+                            Ok(rows)
+                        }
+                        Err(_) => {
+                            *keyset_ok = false;
+                            Ok(Vec::new())
+                        }
+                    }
+                }
+                _ => v.export_batch(tref, offset, EXPORT_BATCH),
+            },
+        }
+    }
+}
+
+/// 后台线程：整库导出建表结构 DDL（建表语句，schema-only），结果经 sink 回传。
+/// MySQL/PG 整库 = 该库/schema 全部表 DDL + 视图；Turso = sqlite_master 全部条目。
+pub fn spawn_export_schema(
+    sink: MsgSink<DbMsg>,
+    source: DbSource,
+    group: String,
+    dest: std::path::PathBuf,
+) {
+    std::thread::spawn(move || {
+        let sink = std::sync::Arc::new(std::sync::Mutex::new(sink));
+        let emit = std::sync::Arc::new(move |msg: DbMsg| {
+            if let Ok(s) = sink.lock() {
+                s(msg);
+            }
+        });
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(move || {
+            let ddl: Vec<String> = match &source {
+                DbSource::Turso(_) => {
+                    let mut viewer = TursoViewer {
+                        source: match source {
+                            DbSource::Turso(s) => s,
+                            _ => unreachable!(),
+                        },
+                        ..Default::default()
+                    };
+                    viewer.export_ddl(None)?
+                }
+                DbSource::MySql(_) => {
+                    let mut viewer = MySqlViewer {
+                        source: match source {
+                            DbSource::MySql(s) => s,
+                            _ => unreachable!(),
+                        },
+                        ..Default::default()
+                    };
+                    viewer.export_ddl(&group, None)?
+                }
+                DbSource::Pg(_) => {
+                    let mut viewer = PgViewer {
+                        source: match source {
+                            DbSource::Pg(s) => s,
+                            _ => unreachable!(),
+                        },
+                        ..Default::default()
+                    };
+                    viewer.export_ddl(&group, None)?
+                }
+            };
+            if ddl.is_empty() {
+                return Err(lang::TURSO_EXPORT_NO_COLS());
+            }
+            std::fs::write(&dest, ddl.join("\n"))
+                .map_err(|e| lang::ERR_EXPORT_OPEN(e.to_string()))?;
+            Ok::<_, String>(dest.to_string_lossy().to_string())
+        }));
+        let msg = match result {
+            Ok(Ok(path)) => DbMsg::ExportDone(Ok(path)),
+            Ok(Err(e)) => DbMsg::ExportDone(Err(e)),
+            Err(_) => DbMsg::ExportDone(Err(lang::MYSQL_UNKNOWN_PANIC())),
+        };
+        emit(msg);
+    });
+}
+
+/// 后台线程：单表导出为 SQL INSERT 脚本（分批流式写盘 + 进度汇报），
+/// 支持三种后端（Turso 走 rowid 游标，MySQL/PG 走主键游标、OFFSET 回退），结果经 sink 回传
+pub fn spawn_export_sql(
+    sink: MsgSink<DbMsg>,
+    source: DbSource,
+    group: String,
+    table: String,
+    dest: std::path::PathBuf,
+) {
+    std::thread::spawn(move || {
+        let sink = std::sync::Arc::new(std::sync::Mutex::new(sink));
+        let emit = std::sync::Arc::new(move |msg: DbMsg| {
+            if let Ok(s) = sink.lock() {
+                s(msg);
+            }
+        });
+        let emit_progress = emit.clone();
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(move || {
+            let display_name = format!("{}.{}", group, table);
+            // 统一取行器 + 列名/总数（Turso 保留自身 rowid keyset 路径）
+            let (cols, total, mut fetcher, mut turso) = match &source {
+                DbSource::Turso(src) => {
+                    let mut viewer = TursoViewer {
+                        source: src.clone(),
+                        ..Default::default()
+                    };
+                    let (cols, total) = viewer.export_begin(&table)?;
+                    (cols, total, None, Some(viewer))
+                }
+                DbSource::MySql(src) => {
+                    let mut viewer = MySqlViewer {
+                        source: src.clone(),
+                        ..Default::default()
+                    };
+                    let tref = MySqlTableRef {
+                        database: group.clone(),
+                        table: table.clone(),
+                    };
+                    let (cols, total) = viewer.export_begin(&tref)?;
+                    let pk = viewer.export_pk(&tref).unwrap_or(None);
+                    (
+                        cols,
+                        total,
+                        Some((BatchFetcher::MySql(viewer, tref), pk)),
+                        None,
+                    )
+                }
+                DbSource::Pg(src) => {
+                    let mut viewer = PgViewer {
+                        source: src.clone(),
+                        ..Default::default()
+                    };
+                    let tref = PgTableRef {
+                        db: String::new(),
+                        schema: group.clone(),
+                        table: table.clone(),
+                    };
+                    let (cols, total) = viewer.export_begin(&tref)?;
+                    let pk = viewer.export_pk(&group, &table).unwrap_or(None);
+                    (
+                        cols,
+                        total,
+                        Some((BatchFetcher::Pg(viewer, tref), pk)),
+                        None,
+                    )
+                }
+            };
+            if cols.is_empty() {
+                return Err(lang::TURSO_EXPORT_NO_COLS());
+            }
+            // 列名引号包裹（sql_literal 只管值；列名按各自方言引号包裹已由上层做不了——
+            // 这里统一用双引号，MySQL 在 ANSI_QUOTES 外的默认模式下不识别，
+            // 故 MySQL 单独用反引号）
+            let quoted_cols: Vec<String> = match &source {
+                DbSource::MySql(_) => cols
+                    .iter()
+                    .map(|c| format!("`{}`", c.replace('`', "``")))
+                    .collect(),
+                _ => cols
+                    .iter()
+                    .map(|c| format!("\"{}\"", c.replace('"', "\"\"")))
+                    .collect(),
+            };
+            let qualified = match &source {
+                DbSource::MySql(_) => format!(
+                    "`{}`.`{}`",
+                    group.replace('`', "``"),
+                    table.replace('`', "``")
+                ),
+                DbSource::Pg(_) => format!(
+                    "\"{}\".\"{}\"",
+                    group.replace('"', "\"\""),
+                    table.replace('"', "\"\"")
+                ),
+                DbSource::Turso(_) => format!("\"{}\"", table.replace('"', "\"\"")),
+            };
+
+            use std::io::Write;
+            let file =
+                std::fs::File::create(&dest).map_err(|e| lang::ERR_EXPORT_OPEN(e.to_string()))?;
+            let mut w = std::io::BufWriter::new(file);
+            // 事务包裹：目标库导入更快且失败可整体回滚（SQLite 方言 BEGIN 也通用）
+            writeln!(w, "BEGIN TRANSACTION;").map_err(|e| lang::ERR_EXPORT_WRITE(e.to_string()))?;
+
+            let mut done = 0usize;
+            let mut last_report = std::time::Instant::now();
+            let mut cursor: Option<String> = None; // 主键/rowid 游标
+            let mut keyset_ok = true; // keyset 查询失败后回退 OFFSET
+            let mut turso_rowid: i64 = 0;
+            let mut turso_keyset = true;
+            while done < total {
+                let rows = if let Some(v) = &mut turso {
+                    // Turso：rowid keyset 优先，失败回退 OFFSET（同 CSV 导出逻辑）
+                    if turso_keyset {
+                        match v.export_batch_keyset(&table, turso_rowid, EXPORT_BATCH) {
+                            Ok((rows, Some(last))) => {
+                                turso_rowid = last;
+                                rows
+                            }
+                            Ok((rows, None)) => {
+                                if rows.is_empty() {
+                                    break;
+                                }
+                                rows
+                            }
+                            Err(_) => {
+                                turso_keyset = false;
+                                continue;
+                            }
+                        }
+                    } else {
+                        let rows = v.export_batch(&table, done, EXPORT_BATCH)?;
+                        if rows.is_empty() {
+                            return Err(lang::TURSO_EXPORT_TRUNCATED(format!(
+                                "{}/{}",
+                                done, total
+                            )));
+                        }
+                        rows
+                    }
+                } else if let Some((fetcher, pk)) = &mut fetcher {
+                    let rows =
+                        fetcher.next_batch(pk.as_deref(), &mut cursor, done, &mut keyset_ok)?;
+                    if rows.is_empty() {
+                        if keyset_ok {
+                            // keyset 空批 = 到表尾（COUNT 与数据的自然偏差视为完成）
+                            break;
+                        }
+                        // OFFSET 空批：数据比 COUNT 少，报错而非静默导出残缺文件
+                        return Err(lang::TURSO_EXPORT_TRUNCATED(format!("{}/{}", done, total)));
+                    }
+                    rows
+                } else {
+                    break;
+                };
+                for row in &rows {
+                    writeln!(w, "{}", insert_stmt(&qualified, &quoted_cols, row))
+                        .map_err(|e| lang::ERR_EXPORT_WRITE(e.to_string()))?;
+                }
+                done += rows.len();
+                if last_report.elapsed() >= std::time::Duration::from_millis(100) || done >= total {
+                    emit_progress(DbMsg::ExportProgress { done, total });
+                    last_report = std::time::Instant::now();
+                }
+            }
+            writeln!(w, "COMMIT;").map_err(|e| lang::ERR_EXPORT_WRITE(e.to_string()))?;
+            w.flush()
+                .map_err(|e| lang::ERR_EXPORT_WRITE(e.to_string()))?;
+            Ok::<_, String>(format!("{} ({})", dest.to_string_lossy(), display_name))
+        }));
+        let msg = match result {
+            Ok(Ok(path)) => DbMsg::ExportDone(Ok(path)),
+            Ok(Err(e)) => DbMsg::ExportDone(Err(e)),
+            Err(_) => DbMsg::ExportDone(Err(lang::MYSQL_UNKNOWN_PANIC())),
+        };
+        emit(msg);
+    });
+}
 
 /// 后台线程：分批导出整表为 CSV（每批 EXPORT_BATCH 行，经 sink 汇报进度），结果经 sink 回传
 pub fn spawn_export_csv(
@@ -431,8 +780,8 @@ pub fn spawn_load_table_grouped(
     });
 }
 
-/// 后台线程：分批导出 MySQL/PG 整表为 CSV（复用 turso 版的节流/回退框架，
-/// 但 MySQL/PG 无 rowid 游标，一律 OFFSET 分批），结果经 sink 回传
+/// 后台线程：分批导出 MySQL/PG 整表为 CSV（复用 turso 版的节流框架；
+/// MySQL/PG 走主键游标 keyset 分批（O(n)），无主键/keyset 失败回退 OFFSET），结果经 sink 回传
 pub fn spawn_export_csv_grouped(
     sink: MsgSink<DbMsg>,
     source: DbSource,
@@ -450,29 +799,33 @@ pub fn spawn_export_csv_grouped(
         let emit_progress = emit.clone();
         let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(move || {
             let display_name = format!("{}.{}", group, table);
-            let (cols, total, mut viewer) = match &source {
+            let (cols, total, fetcher) = match &source {
                 DbSource::MySql(src) => {
                     let mut viewer = MySqlViewer {
                         source: src.clone(),
                         ..Default::default()
                     };
-                    let (cols, total) = viewer.export_begin(&MySqlTableRef {
+                    let tref = MySqlTableRef {
                         database: group.clone(),
                         table: table.clone(),
-                    })?;
-                    (cols, total, ExportViewer::MySql(viewer))
+                    };
+                    let (cols, total) = viewer.export_begin(&tref)?;
+                    let pk = viewer.export_pk(&tref).unwrap_or(None);
+                    (cols, total, Some((BatchFetcher::MySql(viewer, tref), pk)))
                 }
                 DbSource::Pg(src) => {
                     let mut viewer = PgViewer {
                         source: src.clone(),
                         ..Default::default()
                     };
-                    let (cols, total) = viewer.export_begin(&PgTableRef {
+                    let tref = PgTableRef {
                         db: String::new(), // 严格按连接串的库：不跨库重写
                         schema: group.clone(),
                         table: table.clone(),
-                    })?;
-                    (cols, total, ExportViewer::Pg(viewer))
+                    };
+                    let (cols, total) = viewer.export_begin(&tref)?;
+                    let pk = viewer.export_pk(&group, &table).unwrap_or(None);
+                    (cols, total, Some((BatchFetcher::Pg(viewer, tref), pk)))
                 }
                 DbSource::Turso(_) => {
                     return Err(lang::ERR_EXPORT_OPEN(
@@ -495,28 +848,19 @@ pub fn spawn_export_csv_grouped(
 
             let mut done = 0usize;
             let mut last_report = std::time::Instant::now();
+            let mut cursor: Option<String> = None;
+            let mut keyset_ok = true;
+            let Some((mut fetcher, pk)) = fetcher else {
+                return Err(lang::TURSO_EXPORT_NO_COLS());
+            };
             while done < total {
-                let rows = match &mut viewer {
-                    ExportViewer::MySql(v) => v.export_batch(
-                        &MySqlTableRef {
-                            database: group.clone(),
-                            table: table.clone(),
-                        },
-                        done,
-                        EXPORT_BATCH,
-                    )?,
-                    ExportViewer::Pg(v) => v.export_batch(
-                        &PgTableRef {
-                            db: String::new(), // 严格按连接串的库：不跨库重写
-                            schema: group.clone(),
-                            table: table.clone(),
-                        },
-                        done,
-                        EXPORT_BATCH,
-                    )?,
-                };
+                let rows = fetcher.next_batch(pk.as_deref(), &mut cursor, done, &mut keyset_ok)?;
                 if rows.is_empty() {
-                    // 数据比 COUNT 少（并发删行等）：报错而非静默导出残缺文件
+                    if keyset_ok {
+                        // keyset 空批 = 到表尾（COUNT 与数据的自然偏差视为完成）
+                        break;
+                    }
+                    // OFFSET 空批：数据比 COUNT 少（并发删行等）：报错而非静默导出残缺文件
                     return Err(lang::TURSO_EXPORT_TRUNCATED(format!("{}/{}", done, total)));
                 }
                 for row in &rows {
@@ -541,12 +885,6 @@ pub fn spawn_export_csv_grouped(
         };
         emit(msg);
     });
-}
-
-/// 导出用 viewer 包装（两种后端的批量取行接口统一）
-enum ExportViewer {
-    MySql(MySqlViewer),
-    Pg(PgViewer),
 }
 
 #[cfg(test)]
@@ -580,8 +918,9 @@ mod tests {
     }
 
     #[test]
-    fn export_viewer_enum_size_sane() {
-        // 仅保证包装枚举可构造（类型存在且无运行时陷阱）
-        let _ = std::mem::size_of::<ExportViewer>() > 0;
+    fn sql_literal_null_and_escape() {
+        assert_eq!(sql_literal("NULL"), "NULL");
+        assert_eq!(sql_literal("abc"), "'abc'");
+        assert_eq!(sql_literal("o'clock"), "'o''clock'");
     }
 }

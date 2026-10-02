@@ -171,6 +171,18 @@ pub fn mgr_dialog(
     btn_save: Element,
 ) -> Element {
     let th = windui::theme::current();
+    // 页脚「关闭」按钮与标题栏 ✕ 共用关闭回调：FnMut 闭包不可克隆，
+    // 包一层 Rc<RefCell<dyn FnMut>> 供两处按钮共享
+    type CloseFn = dyn FnMut(&mut windui::core::EventCtx);
+    let on_close: std::rc::Rc<std::cell::RefCell<CloseFn>> =
+        std::rc::Rc::new(std::cell::RefCell::new(on_close));
+    let close_btn = {
+        let on_close = on_close.clone();
+        Element::button(crate::lang::DT_CLOSE())
+            .small()
+            .neutral()
+            .on_click(move |ctx| (on_close.borrow_mut())(ctx))
+    };
     let header = Element::row()
         .width_match()
         .cross(Align::Center)
@@ -187,7 +199,7 @@ pub fn mgr_dialog(
                 .size(28, 28)
                 .fg_role(Role::TextMuted)
                 .focusable(false) // 关键：不进焦点环，弹窗打开时焦点落到正文输入框
-                .on_click(on_close),
+                .on_click(move |ctx| (on_close.borrow_mut())(ctx)),
         );
     let footer = Element::col()
         .width_match()
@@ -200,7 +212,8 @@ pub fn mgr_dialog(
                 .child(btn_new)
                 .child(Element::flex_spacer())
                 .child(btn_del)
-                .child(btn_save),
+                .child(btn_save)
+                .child(close_btn),
         );
     let panel = Element::col()
         .width(width)

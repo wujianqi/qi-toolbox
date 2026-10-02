@@ -12,34 +12,19 @@
 
 ## 中文
 
-轻量级一站式服务器快捷管理工具箱，基于 Rust + windui 构建的原生 Windows 桌面应用，集 2FA 验证码生成、账号密码加密、数据库浏览（Turso / MySQL / PostgreSQL）、SFTP 文件管理、S3 对象存储浏览、远程检测（连接 / Ping / SSL 证书 / 响应体 / SEO 分析 / 安全检测）于一体。
-
-> **特点**：单文件绿色版、零安装、无后台进程；敏感数据（TOTP 密钥、SFTP 密码等）本地加密存储（Windows 走 DPAPI）；内置中英双语，跟随系统语言启动，可在应用内一键切换。
+轻量级一站式服务器快捷管理工具箱，基于 Rust + windui 构建的原生 Windows 桌面应用，集 2FA 验证码生成、账号密码加密、数据库浏览（Turso / MySQL / PostgreSQL）、SFTP 文件管理、S3 对象存储浏览、运维备忘、远程检测（连接 / Ping / SSL 证书 / 响应体 / SEO 分析 / 安全检测）于一体。
 
 ### ✨ 亮点
 
-- **一个 exe 走天下**：单文件绿色版，下载即用，U 盘可携带，不写注册表、无后台进程
+- **一个 exe 走天下**：整个软件仅约 15 MB，单文件绿色版，下载即用，U 盘可携带，不写注册表、无后台进程
+- **极致轻量**：整个软件仅约 **15 MB** —— 七大功能模块装进一个文件，比很多软件的一张截图还小
+- **原生性能**：纯 Rust 构建，原生 Windows GUI —— 秒级启动、内存占用极低、不卡 UI，彻底告别 Electron 式动辄几百 MB 的臃肿
 - **数据只属于你**：TOTP 密钥、SFTP 密码等敏感信息全部本地加密存储（Windows DPAPI）
 - **从密码到上线的完整链路**：生成密码 → 哈希加密 → 生成 SQL → SFTP 部署 → 远程检测，一个工具贯穿全流程
-- **原生性能**：Rust 构建，原生 Windows GUI，启动即开即用，无 Electron 式臃肿
 - **安全体检一体化**：SSL 证书 / 安全响应头 / 敏感路径 / 风险端口 / TLS 旧版本，一键扫描
 - **中英双语随行**：跟随系统语言启动，应用内一键切换
 
 ### 功能
-
-#### 2FA TOTP 验证码生成
-
-- 生成兼容主流平台的 Base32 安全密钥
-- 实时生成 6 位 TOTP 验证码（SHA1, 30s 步长）
-- 生成 otpauth:// 二维码，可直接扫码配置 Google Authenticator / Authy
-- 密钥本地保存，方便重复使用
-
-#### 账号密码加密
-
-- 支持 Argon2id / Bcrypt / PBKDF2 三种主流哈希算法
-- 平台预设：Laravel、Django、Spring Boot、Express、ASP.NET Core、Rails、WordPress、Go
-- 一键生成 8/12/16 位随机密码（包含大小写字母、数字、特殊字符）
-- 自动生成 SQL UPDATE 语句，方便直接应用到数据库
 
 #### 数据库浏览（Turso / MySQL / PostgreSQL）
 
@@ -48,20 +33,44 @@
 - 浏览所有表及表结构
 - 数据表格展示，支持列过滤和分页
 - 内置 SQL 查询编辑器，支持语法高亮
-- 数据导出 CSV，行详情查看模式
+- 数据导出 CSV，整库结构导出 DDL（schema.sql），行详情查看模式
+- SQL 只读模式：一键拦截写语句，浏览数据更安心
+- 查询管理：常用 SQL 保存 / 复用 / 删除
 
 #### S3 对象存储浏览
 
 - 连接 S3 兼容对象存储（AWS S3、MinIO、Cloudflare R2 等）
-- Bucket 与对象列表浏览，路径式 / 虚拟主机式寻址可选
+- Bucket 与对象列表浏览，路径式 / 虚拟主机式寻址可选，支持关键字过滤
 - 对象上传 / 下载 / 删除
+- 大文件断点续传：上传超 64 MB 自动 Multipart 分片（进度落盘，重传跳过已完成分片）；下载经 Range 从断点续写
+- 一键生成预签名分享链接（1 小时有效）
 
 #### SFTP 文件管理
 
 - SSH 密码认证连接，文件列表浏览（目录优先排序）
+- SSH 私钥认证：支持 OpenSSH / PEM 等常见格式，密钥口令可选
 - 上传 / 下载 / 新建文件夹 / 删除，大文件分块流式传输
+- 断点续传：上传 / 下载中断后重试，自动从已传输的字节处继续，已完整的文件跳过重传
+- 文件权限设置：对所有者 / 组 / 其他人分别勾选 读、写、执行（chmod）
+- 服务器主机密钥指纹校验，防中间人攻击（指纹变化时拒绝连接）
 - 复用 SSH 会话执行远程命令
 - 内置部署 / 维护常用命令模板（系统状态、服务管理、部署容器、网络），点选即填入命令框
+
+#### 2FA TOTP 验证码生成
+
+- 生成兼容主流平台的 Base32 安全密钥
+- 实时生成 6 位 TOTP 验证码（SHA1, 30s 步长）
+- 生成 otpauth:// 二维码，可直接扫码配置 Google Authenticator / Authy
+- 支持粘贴 otpauth:// URI 一键导入（迁移 / 备份密钥）
+- 生成后自动复制开关，密钥本地保存，方便重复使用
+
+#### 账号密码加密
+
+- 支持 Argon2id / Bcrypt / PBKDF2 三种主流哈希算法
+- 平台预设：Laravel、Django、Spring Boot、Express、ASP.NET Core、Rails、WordPress、Go
+- 一键生成 8/12/16 位随机密码（包含大小写字母、数字、特殊字符）
+- 自动生成 SQL UPDATE 语句，方便直接应用到数据库
+- 哈希校验：粘贴哈希串即可验证密码是否匹配，自动识别算法
 
 #### 远程检测
 
@@ -74,18 +83,19 @@
 - 安全检测：敏感路径暴露 / 安全响应头缺失 / 风险端口开放 / TLS 旧版本兼容，一键扫描分级报告（仅 http/https）
 - 端点二维码：一键生成当前地址二维码，扫码即可分发
 
-### 界面截图
+#### 运维备忘
 
-> 截图存放于 `docs/screenshots/`，随版本发布更新。
+- 文本备忘的新增 / 编辑 / 删除，本地 Turso（store.db）存储
+- 月历选日期：点选日期过滤当天备忘，再点取消；有备忘的日期绿色加粗标记
+- 备忘可关联日期（可空），按更新时间倒序展示
+- 无标题 / 空内容限制，随手记录更自由
+
+### 界面截图
 
 | 模块 | 截图 |
 |---|---|
-| 2FA TOTP 验证码 | ![TOTP](docs/screenshots/totp.png) |
 | 数据库浏览 | ![数据库](docs/screenshots/database.png) |
 | SFTP 文件管理 | ![SFTP](docs/screenshots/sftp.png) |
-| 远程检测 | ![远程检测](docs/screenshots/remote.png) |
-| 密码加密 | ![密码](docs/screenshots/password.png) |
-| S3 对象存储 | ![S3](docs/screenshots/s3.png) |
 
 ### 预编译下载
 
@@ -99,7 +109,7 @@
 
 - [Rust](https://www.rust-lang.org/tools/install) (2021 edition)
 
-> 注：项目目前主要面向 Windows（windui 为 Windows 原生 GUI 框架），其他平台未经充分测试。
+> 注：项目目前主要面向 Windows，其他平台未经充分测试。
 
 #### 编译
 
@@ -123,34 +133,21 @@ cargo build --release
 
 ## English
 
-Lightweight one-stop server management toolbox — a native Windows desktop app built with Rust + windui, combining a 2FA authenticator, password hashing, database viewers (Turso / MySQL / PostgreSQL), an SFTP file manager, an S3 object storage browser, and remote checks (connect / ping / SSL certificate / response body / SEO analysis / security scan).
+Lightweight one-stop server management toolbox — a native Windows desktop app built with Rust + windui, combining a 2FA authenticator, password hashing, database viewers (Turso / MySQL / PostgreSQL), an SFTP file manager, an S3 object storage browser, an ops memo pad, and remote checks (connect / ping / SSL certificate / response body / SEO analysis / security scan).
 
-> **Highlights**: single-file portable build, zero install, no background services; sensitive data (TOTP secrets, SFTP passwords, etc.) is stored locally with platform encryption (DPAPI on Windows); built-in zh/en bilingual UI follows the system language and can be switched in-app.
+> **Highlights**: the entire app is only ~15 MB — single-file portable build, zero install, no background services; pure-Rust native implementation with instant startup and minimal memory footprint; sensitive data (TOTP secrets, SFTP passwords, etc.) is stored locally with platform encryption (DPAPI on Windows); built-in zh/en bilingual UI follows the system language and can be switched in-app.
 
 ### ✨ Highlights
 
 - **One exe for everything**: single-file portable build, download and run, USB-stick friendly, no registry writes, no background processes
+- **Ultra lightweight**: the entire app is only ~**15 MB** — seven feature modules packed into one file, smaller than a screenshot of many other apps
+- **Native performance**: pure Rust with a native Windows GUI — instant startup, minimal memory footprint, silky-smooth UI. Zero Electron bloat (which typically weighs hundreds of MB)
 - **Your data stays yours**: TOTP secrets, SFTP passwords and other sensitive data are stored locally with encryption (DPAPI on Windows)
 - **Full workflow from password to production**: generate password → hash → SQL → SFTP deploy → remote check, all in one tool
-- **Native performance**: built with Rust and a native Windows GUI — instant startup, no Electron bloat
 - **One-click security scan**: SSL certificate / security headers / sensitive paths / risky ports / legacy TLS, with a graded report
 - **Bilingual out of the box**: follows system language, one-click switch in-app
 
 ### Features
-
-#### 2FA TOTP Authenticator
-
-- Generate Base32 secret keys compatible with major platforms
-- Real-time 6-digit TOTP code generation (SHA1, 30s step)
-- Generate otpauth:// QR codes for Google Authenticator / Authy setup
-- Save keys locally for reuse
-
-#### Password Hashing
-
-- Supports Argon2id / Bcrypt / PBKDF2 algorithms
-- Platform presets: Laravel, Django, Spring Boot, Express, ASP.NET Core, Rails, WordPress, Go
-- Generate random passwords (8/12/16 chars) with uppercase, lowercase, digits, and symbols
-- Auto-generate SQL UPDATE statements for direct database use
 
 #### Database Viewer (Turso / MySQL / PostgreSQL)
 
@@ -159,20 +156,44 @@ Lightweight one-stop server management toolbox — a native Windows desktop app 
 - Browse all tables and schema
 - Data grid with column filtering and pagination
 - Built-in SQL query editor with syntax highlighting
-- CSV export and row detail view
+- CSV export, full schema export as DDL (schema.sql), and row detail view
+- SQL read-only mode: one-click blocker for write statements, safer browsing
+- Query manager: save / reuse / delete frequently used SQL
 
 #### S3 Object Storage Browser
 
 - Connect to S3-compatible object storage (AWS S3, MinIO, Cloudflare R2, etc.)
-- Bucket / object listing with path-style or virtual-host addressing
+- Bucket / object listing with path-style or virtual-host addressing, keyword filtering
 - Object upload / download / delete
+- Resumable transfers for large files: uploads over 64 MB automatically switch to multipart (progress persisted to disk, finished parts skipped on retry); downloads resume via Range from the last byte
+- One-click presigned share link (valid for 1 hour)
 
 #### SFTP File Manager
 
 - Password-authenticated SSH connections, directory listing (directories first)
+- SSH private-key auth: OpenSSH / PEM and other common formats, optional key passphrase
 - Upload / download / mkdir / delete, chunked streaming for large files
+- Resumable transfers: retrying an interrupted upload / download continues from the last transferred byte; fully downloaded files are skipped
+- File permission settings: check Read / Write / Execute for Owner / Group / Others (chmod)
+- Server host-key fingerprint verification against MITM (connection refused on fingerprint change)
 - Run remote commands over the existing SSH session
 - Built-in deploy/maintenance command templates (system, services, deploy & containers, network), click to fill the command box
+
+#### 2FA TOTP Authenticator
+
+- Generate Base32 secret keys compatible with major platforms
+- Real-time 6-digit TOTP code generation (SHA1, 30s step)
+- Generate otpauth:// QR codes for Google Authenticator / Authy setup
+- Paste an otpauth:// URI to import in one click (key migration / backup)
+- Auto-copy toggle after generation; save keys locally for reuse
+
+#### Password Hashing
+
+- Supports Argon2id / Bcrypt / PBKDF2 algorithms
+- Platform presets: Laravel, Django, Spring Boot, Express, ASP.NET Core, Rails, WordPress, Go
+- Generate random passwords (8/12/16 chars) with uppercase, lowercase, digits, and symbols
+- Auto-generate SQL UPDATE statements for direct database use
+- Hash verification: paste a hash to check if a password matches, with automatic algorithm detection
 
 #### Remote Check
 
@@ -185,18 +206,21 @@ Lightweight one-stop server management toolbox — a native Windows desktop app 
 - Security scan: sensitive path exposure / missing security headers / risky open ports / legacy TLS support, one-click graded report (http/https only)
 - Endpoint QR code: one-click QR for the current URL, scan to share
 
+#### Ops Memo
+
+- Create / edit / delete text memos, stored in the local Turso store (store.db)
+- Calendar date picking: click a date to filter that day's memos, click again to clear; dates with memos are marked in bold green
+- Memos can be linked to a date (optional), listed newest-first by update time
+- No forced title or content — jot down notes freely
+
 ### Screenshots
 
 > Screenshots live in `docs/screenshots/` and are updated with each release.
 
 | Module | Screenshot |
 |---|---|
-| 2FA TOTP Authenticator | ![TOTP](docs/screenshots/totp.png) |
 | Database Viewer | ![Database](docs/screenshots/database.png) |
 | SFTP File Manager | ![SFTP](docs/screenshots/sftp.png) |
-| Remote Check | ![Remote](docs/screenshots/remote.png) |
-| Password Hashing | ![Password](docs/screenshots/password.png) |
-| S3 Object Storage | ![S3](docs/screenshots/s3.png) |
 
 ### Download
 
@@ -209,8 +233,6 @@ Visit the [Releases](https://github.com/wujianqi/qi-toolbox/releases) page.
 #### Prerequisites
 
 - [Rust](https://www.rust-lang.org/tools/install) (2021 edition)
-
-> 注：项目目前主要面向 Windows（windui 为 Windows 原生 GUI 框架），其他平台未经充分测试。
 
 #### Build
 

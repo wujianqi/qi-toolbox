@@ -5,7 +5,7 @@ use windui::prelude::*;
 
 use super::nav;
 use super::shell::set_window_title;
-use super::{icons, mysql, password, pg, remote, s3, sftp, totp, turso, AppState};
+use super::{icons, memo, mysql, password, pg, remote, s3, sftp, totp, turso, AppState};
 use crate::lang;
 
 // ══════════════════════════════════════════════════════════════════
@@ -29,7 +29,7 @@ pub(super) fn build_ui(state: &AppState, th: ThemeHandle) -> Element {
 
     // ── 左侧栏：品牌区 + 可拖拽排序的导航（2FA / 密码 / Turso / SFTP/SSH / 远程 / 关于）──
     // 模块定义：数组下标即模块 id，内容页按 id 显隐；拖拽只调侧栏顺序、不改 id。
-    let nav_items: [(String, &[u8]); 9] = [
+    let nav_items: [(String, &[u8]); 10] = [
         (lang::TAB_2FA(), icons::ZAP),
         (lang::TAB_PASSWORD(), icons::LOCK),
         (lang::TAB_TURSO(), icons::SQLITE),
@@ -39,6 +39,7 @@ pub(super) fn build_ui(state: &AppState, th: ThemeHandle) -> Element {
         (lang::S3_TAB(), icons::CLOUD),
         (lang::MYSQL_TAB(), icons::MYSQL),
         (lang::PG_TAB(), icons::POSTGRESQL),
+        (lang::MEMO_TAB(), icons::NOTE),
     ];
     // 数据驱动重排：顺序真值源 = nav_order 信号（拖拽后应用自行改信号 → 整列重建，
     // 反向同步天然成立，恢复默认/重新载入配置都只需要 set 信号）
@@ -173,6 +174,7 @@ pub(super) fn build_ui(state: &AppState, th: ThemeHandle) -> Element {
         .child(sftp_page.visible_when(move || tab.get() == 3))
         .child(remote_page.visible_when(move || tab.get() == 4))
         .child(s3_page.visible_when(move || tab.get() == 6))
+        .child(memo::build_memo_tab(&state.memo).visible_when(move || tab.get() == 9))
         .child(nav::build_about_page().visible_when(move || tab.get() == 5));
 
     // ── 菜单折叠手柄：贴在侧栏分隔线右侧的**右半胶囊**（SVG 实心形状，9×46，
@@ -199,16 +201,19 @@ pub(super) fn build_ui(state: &AppState, th: ThemeHandle) -> Element {
             })
             .child(
                 Element::image_content(
-                    ImageContent::from_svg_bytes(icons::HANDLE_TAB, Some(9))
+                    ImageContent::from_svg_bytes(icons::HANDLE_TAB, None)
                         .tint(Role::Divider.resolve(&windui::theme::current())),
                 )
                 .align(Align::Center),
             )
             .child(
                 Element::image_content(
-                    ImageContent::from_svg_bytes(chevron, Some(14))
+                    ImageContent::from_svg_bytes(chevron, None)
                         .tint(Role::TextMuted.resolve(&windui::theme::current())),
                 )
+                // 矢量源固有 24dp：钉回原 Some(14) 的逻辑尺寸
+                .width(14)
+                .height(14)
                 .align(Align::Center),
             )
     };
@@ -261,7 +266,6 @@ pub(super) fn build_ui(state: &AppState, th: ThemeHandle) -> Element {
         .child(totp_backup_dialog);
     // 主口令门控（首次设置/换环境解锁）：主界面照常构建渲染，门控以自绘
     // 遮罩浮层叠在其上（背景界面可见不显空白，且未注册模态——窗体 ✕ 直接退出应用）
-    main_ui.child(
-        super::master::build_gate(&state.master_gate).visible_when(move || gate_show.get()),
-    )
+    main_ui
+        .child(super::master::build_gate(&state.master_gate).visible_when(move || gate_show.get()))
 }

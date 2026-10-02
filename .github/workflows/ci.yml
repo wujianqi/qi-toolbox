@@ -1,0 +1,82 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+env:
+  CARGO_TERM_COLOR: always
+  CARGO_INCREMENTAL: 0
+
+jobs:
+  lint:
+    name: fmt + clippy + signal 检查
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+      - uses: Swatinem/rust-cache@v2
+      - name: cargo fmt --check
+        run: cargo fmt --all --check
+      - name: cargo clippy
+        run: cargo clippy --all-targets -- -D warnings
+      - name: signal 误用静态检查（build_* 内禁建 signal）
+        run: python3 scripts/check_signals.py
+
+  test:
+    name: 单元测试
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo test --lib --bins
+
+  check-examples:
+    name: examples 编译检查
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo check --examples
+
+  integration:
+    name: 集成冒烟（MySQL/PG 服务容器）
+    runs-on: ubuntu-latest
+    services:
+      mysql:
+        image: mysql:8
+        env:
+          MYSQL_ROOT_PASSWORD: qi-test
+          MYSQL_DATABASE: mysql
+        ports:
+          - 3306:3306
+        options: >-
+          --health-cmd="mysqladmin ping -pqi-test"
+          --health-interval=5s --health-timeout=3s --health-retries=20
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_USER: sa
+          POSTGRES_PASSWORD: qi-test
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd="pg_isready -U sa"
+          --health-interval=5s --health-timeout=3s --health-retries=20
+    env:
+      QI_MYSQL_URL: mysql://root:qi-test@127.0.0.1:3306/mysql
+      QI_PG_URL: postgres://sa:qi-test@127.0.0.1:5432/postgres
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: MySQL 冒烟
+        run: cargo run --example mysql_integration_test
+      - name: PG 冒烟
+        run: cargo run --example pg_integration_test

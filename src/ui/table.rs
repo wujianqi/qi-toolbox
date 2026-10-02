@@ -11,7 +11,7 @@ use windui::prelude::*;
 
 use super::icons;
 use super::select_text;
-use super::sink;
+use super::sink_opt;
 use crate::core;
 use crate::core::turso::TursoSource;
 use crate::lang;
@@ -31,7 +31,7 @@ pub fn default_visible(len: usize) -> Vec<bool> {
 fn cell_text_sig(i: usize, value: &str) -> Signal<String> {
     use std::cell::RefCell;
     thread_local! {
-        static POOL: RefCell<Vec<Signal<String>>> = RefCell::new(Vec::new());
+        static POOL: RefCell<Vec<Signal<String>>> = const { RefCell::new(Vec::new()) };
     }
     POOL.with(|p| {
         let mut p = p.borrow_mut();
@@ -73,7 +73,7 @@ pub fn render_table_list(
     tables: Signal<Vec<String>>,
     selected: Signal<Option<String>>,
     make_source: impl Fn() -> Option<TursoSource> + 'static,
-    tx: Sender<core::db::DbMsg>,
+    tx: Option<Sender<core::db::DbMsg>>,
     loading: Signal<bool>,
     pending: Signal<Option<(String, usize)>>,
 ) -> Element {
@@ -106,8 +106,11 @@ pub fn render_table_list(
             .child(
                 // 表名图标：选中随强调色亮起，未选中为弱化灰
                 Element::image_content(
-                    ImageContent::from_svg_bytes(icons::TABLE_ICON, Some(15)).tint(tint),
+                    ImageContent::from_svg_bytes(icons::TABLE_ICON, None).tint(tint),
                 )
+                // 矢量源固有 24dp：钉回原 Some(15) 的逻辑尺寸
+                .width(15)
+                .height(15)
                 .align(Align::Center),
             )
             .child(
@@ -136,7 +139,7 @@ pub fn render_table_list(
             loading.set(true);
             // 异步加载表数据（第 1 页），结果经 channel 回传 UI 线程
             if let Some(src) = make_source() {
-                core::db::spawn_load_table(sink(tx.clone()), src, name.clone(), 0);
+                core::db::spawn_load_table(sink_opt(tx.clone()), src, name.clone(), 0);
             }
             // 强制触发虚拟列表重建，刷新选中高亮
             tables.set(tables.get());
@@ -242,9 +245,12 @@ pub fn render_grouped_table_list(
                 .child(
                     // 库/schema 组头图标（数据库圆柱体）
                     Element::image_content(
-                        ImageContent::from_svg_bytes(icons::DATABASE, Some(14))
+                        ImageContent::from_svg_bytes(icons::DATABASE, None)
                             .tint(Role::Accent.resolve(&windui::theme::current())),
                     )
+                    // 矢量源固有 24dp：钉回原 Some(14) 的逻辑尺寸
+                    .width(14)
+                    .height(14)
                     .align(Align::Center),
                 )
                 .child(
@@ -283,8 +289,11 @@ pub fn render_grouped_table_list(
                 )
                 .child(
                     Element::image_content(
-                        ImageContent::from_svg_bytes(icons::TABLE_ICON, Some(14)).tint(tint),
+                        ImageContent::from_svg_bytes(icons::TABLE_ICON, None).tint(tint),
                     )
+                    // 矢量源固有 24dp：钉回原 Some(14) 的逻辑尺寸
+                    .width(14)
+                    .height(14)
                     .align(Align::Center),
                 )
                 .child(
@@ -323,9 +332,12 @@ fn build_table_view(
             .spacing(10)
             .child(
                 Element::image_content(
-                    ImageContent::from_svg_bytes(icons::TABLE_ICON, Some(34))
+                    ImageContent::from_svg_bytes(icons::TABLE_ICON, None)
                         .tint(Role::TextMuted.resolve(&windui::theme::current())),
                 )
+                // 矢量源固有 24dp：钉回原 Some(34) 的逻辑尺寸
+                .width(34)
+                .height(34)
                 .align(Align::Center),
             )
             .child(
@@ -345,9 +357,12 @@ fn build_table_view(
         .child(
             // 数据视图标题旁的表格小图标，弱化灰不抢标题焦点
             Element::image_content(
-                ImageContent::from_svg_bytes(icons::TABLE_ICON, Some(15))
+                ImageContent::from_svg_bytes(icons::TABLE_ICON, None)
                     .tint(Role::TextMuted.resolve(&windui::theme::current())),
             )
+            // 矢量源固有 24dp：钉回原 Some(15) 的逻辑尺寸
+            .width(15)
+            .height(15)
             .align(Align::Center),
         )
         .child(
@@ -383,7 +398,7 @@ fn build_table_view(
             let row_data = &all[sel];
             let mut detail = Element::col().spacing(4);
             let back = Element::button(lang::DT_BACK())
-                .icon_content(icons::stateful_icon(icons::ARROW_LEFT, Some(14)))
+                .icon_content(icons::stateful_icon(icons::ARROW_LEFT))
                 .small()
                 .outline()
                 .neutral()
@@ -491,8 +506,6 @@ fn build_table_view(
         );
     }
 
-    // SVG 图标只解析一次（StatefulIcon 内 Image 为 Rc 共享，克隆廉价）
-    let search_icon = icons::StatefulIcon::from_svg(icons::SEARCH, Some(16));
     // 正文：官方虚拟滚动列表，每行 = 查看按钮 + 可见列单元格（单行裁切）
     let body = Element::virtual_list(rows, ROW_H, move |idx, row: Vec<String>| {
         let mut r = Element::row()
@@ -507,10 +520,8 @@ fn build_table_view(
         // 「查看」按钮固定最左列：列多了右侧会被裁掉，放左侧始终可见
         r = r.child(
             Element::icon_button_content(
-                search_icon
-                    .as_ref()
-                    .map(|s| s.content())
-                    .unwrap_or_else(|| ImageContent::new(None)),
+                // ImageContent 非 Clone，行构建期现构造（虚拟列表仅构建可见行）
+                icons::stateful_icon(icons::SEARCH),
             )
             .size(26, 26)
             .on_click(move |_| {

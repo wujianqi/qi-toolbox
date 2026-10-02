@@ -9,7 +9,7 @@ use std::rc::Rc;
 
 use windui::prelude::*;
 
-use super::{card, icons, input_dialog, select_text, sink};
+use super::{card, icons, input_dialog, select_text, sink_opt};
 use crate::core;
 use crate::core::qr::QrEntry;
 use crate::core::remote::{self, RemoteEndpoint};
@@ -63,7 +63,7 @@ pub struct RemoteUi {
     pub connected: Signal<bool>,
     /// 当前端点显示
     pub endpoint_display: Signal<String>,
-    pub status: Signal<String>,
+    /// 连接弹窗内的就地错误（解析失败显示在弹窗里，便于修改重试）
     pub error: Signal<String>,
     /// 检测结果多行输出（Ping/SSL/网页状态/安全/SEO 分节拼接，见 [`CHECK_ORDER`]）
     pub result: Signal<String>,
@@ -100,7 +100,6 @@ impl RemoteUi {
             url_input: signal(String::new()),
             connected: signal(false),
             endpoint_display: signal(String::new()),
-            status: signal(String::new()),
             error: signal(String::new()),
             result: signal(String::new()),
             show_web_detail: signal(false),
@@ -124,12 +123,8 @@ impl RemoteUi {
     }
 
     /// 取后台任务通道发送端（UI 构建前已回填）
-    pub fn tx(&self) -> Sender<core::remote::RemoteMsg> {
-        self.tx
-            .borrow()
-            .as_ref()
-            .expect("remote tx 已在 run() 中回填")
-            .clone()
+    pub fn tx(&self) -> Option<Sender<core::remote::RemoteMsg>> {
+        self.tx.borrow().clone()
     }
 
     /// 消费后台检测消息（`App::channel` 回 UI 线程时调用）
@@ -138,29 +133,25 @@ impl RemoteUi {
         let set_section = |kind: CheckKind, text: String| {
             self.sections.borrow_mut()[kind as usize] = Some(text);
             self.refresh_result();
-            self.status.set(String::new());
         };
-        // 单项失败：就地提示（标明来源），同样清"检测中…"状态
+        // 单项失败：toast 提示（标明来源）
         let set_err = |kind: CheckKind, e: String| {
             self.sections.borrow_mut()[kind as usize] = None;
             self.refresh_result();
-            self.status.set(String::new());
-            self.error.set(format!("{}: {}", kind.label(), e));
+            super::toast::err(format!("{}: {}", kind.label(), e));
         };
         match msg {
             core::remote::RemoteMsg::Connected(Ok(info)) => {
                 // 状态行只显示 RTT 与 IP（不重复端点网址，避免过长）
-                self.status
-                    .set(lang::REMOTE_CONNECTED(info.rtt_ms as u64, &info.ip));
-                self.error.set(String::new());
+                super::toast::ok(lang::REMOTE_CONNECTED(info.rtt_ms as u64, &info.ip));
                 // 连接成功即自动跑全套基础检测：Ping + SSL 证书 + 响应体（网页状态）+ SEO
                 if let Some(ep) = self.endpoint.borrow().clone() {
-                    remote::spawn_ping(sink(self.tx()), ep.clone());
-                    remote::spawn_check_ssl(sink(self.tx()), ep.clone());
-                    remote::spawn_web_status(sink(self.tx()), ep);
+                    remote::spawn_ping(sink_opt(self.tx()), ep.clone());
+                    remote::spawn_check_ssl(sink_opt(self.tx()), ep.clone());
+                    remote::spawn_web_status(sink_opt(self.tx()), ep);
                 }
             }
-            core::remote::RemoteMsg::Connected(Err(e)) => self.error.set(e),
+            core::remote::RemoteMsg::Connected(Err(e)) => super::toast::err(e),
             core::remote::RemoteMsg::PingDone(r) => match r {
                 Ok(info) => {
                     let mut text = lang::REMOTE_PING_OK(
@@ -237,7 +228,6 @@ pub fn build_remote_tab(ui: &RemoteUi) -> (Element, Element) {
         url_input,
         connected,
         endpoint_display,
-        status,
         error,
         result,
         show_web_detail,
@@ -254,7 +244,7 @@ pub fn build_remote_tab(ui: &RemoteUi) -> (Element, Element) {
     // ── 连接：弹出网址输入窗（解析成功即视为已连接，可执行后续检测）──
     let connect_btn = Element::button(lang::REMOTE_CONNECT())
         .small()
-        .icon_content(icons::stateful_icon(icons::PLUG, Some(16)))
+        .icon_content(icons::stateful_icon(icons::PLUG))
         .on_click({
             let endpoint = endpoint.clone();
             move |_| {
@@ -272,7 +262,7 @@ pub fn build_remote_tab(ui: &RemoteUi) -> (Element, Element) {
     let web_btn = Element::button(lang::REMOTE_BODY())
         .small()
         .neutral()
-        .icon_content(icons::stateful_icon(icons::GLOBE, Some(16)))
+        .icon_content(icons::stateful_icon(icons::GLOBE))
         .enabled_signal(connected)
         .on_click({
             let tx = tx.clone();
@@ -282,8 +272,8 @@ pub fn build_remote_tab(ui: &RemoteUi) -> (Element, Element) {
                 let ep = endpoint.borrow().clone();
                 if let Some(ep) = ep {
                     ui.web_requested.set(true);
-                    status.set(lang::REMOTE_BUSY().to_string());
-                    remote::spawn_web_status(sink(tx.clone()), ep);
+                    super::toast::info(lang::REMOTE_BUSY());
+                    remote::spawn_web_status(sink_opt(tx.clone()), ep);
                 }
             }
         });
@@ -292,7 +282,7 @@ pub fn build_remote_tab(ui: &RemoteUi) -> (Element, Element) {
     let seo_btn = Element::button(lang::SEO_TITLE())
         .small()
         .neutral()
-        .icon_content(icons::stateful_icon(icons::GLOBE, Some(16)))
+        .icon_content(icons::stateful_icon(icons::GLOBE))
         .enabled_signal(connected)
         .on_click({
             let tx = tx.clone();
@@ -300,8 +290,8 @@ pub fn build_remote_tab(ui: &RemoteUi) -> (Element, Element) {
             move |_| {
                 let ep = endpoint.borrow().clone();
                 if let Some(ep) = ep {
-                    status.set(lang::REMOTE_BUSY().to_string());
-                    remote::spawn_seo(sink(tx.clone()), ep);
+                    super::toast::info(lang::REMOTE_BUSY());
+                    remote::spawn_seo(sink_opt(tx.clone()), ep);
                 }
             }
         });
@@ -310,7 +300,7 @@ pub fn build_remote_tab(ui: &RemoteUi) -> (Element, Element) {
     let sec_btn = Element::button(lang::REMOTE_SEC())
         .small()
         .neutral()
-        .icon_content(icons::stateful_icon(icons::SHIELD, Some(16)))
+        .icon_content(icons::stateful_icon(icons::SHIELD))
         .enabled_signal(connected)
         .on_click({
             let tx = tx.clone();
@@ -318,8 +308,8 @@ pub fn build_remote_tab(ui: &RemoteUi) -> (Element, Element) {
             move |_| {
                 let ep = endpoint.borrow().clone();
                 if let Some(ep) = ep {
-                    status.set(lang::REMOTE_BUSY().to_string());
-                    remote::spawn_security_check(sink(tx.clone()), ep);
+                    super::toast::info(lang::REMOTE_BUSY());
+                    remote::spawn_security_check(sink_opt(tx.clone()), ep);
                 }
             }
         });
@@ -329,7 +319,7 @@ pub fn build_remote_tab(ui: &RemoteUi) -> (Element, Element) {
     let qr_btn = Element::button(lang::REMOTE_QR())
         .small()
         .neutral()
-        .icon_content(icons::stateful_icon(icons::QR, Some(16)))
+        .icon_content(icons::stateful_icon(icons::QR))
         .on_click({
             let endpoint = endpoint.clone();
             move |_| {
@@ -357,7 +347,7 @@ pub fn build_remote_tab(ui: &RemoteUi) -> (Element, Element) {
     let export_btn = Element::button(lang::REMOTE_EXPORT_REPORT())
         .small()
         .neutral()
-        .icon_content(icons::stateful_icon(icons::DOWNLOAD, Some(16)))
+        .icon_content(icons::stateful_icon(icons::DOWNLOAD))
         .on_click({
             let ui = ui.clone();
             move |ctx| {
@@ -379,10 +369,9 @@ pub fn build_remote_tab(ui: &RemoteUi) -> (Element, Element) {
                     }
                 }
                 if !any {
-                    ui.error.set(lang::REMOTE_EXPORT_REPORT_EMPTY());
+                    super::toast::err(lang::REMOTE_EXPORT_REPORT_EMPTY());
                     return;
                 }
-                ui.error.set(String::new());
                 ctx.request_save_file(
                     PickDialog::new()
                         .title(lang::REMOTE_EXPORT_REPORT_TITLE())
@@ -391,10 +380,10 @@ pub fn build_remote_tab(ui: &RemoteUi) -> (Element, Element) {
                     move |path: Option<PathBuf>| {
                         if let Some(dest) = path {
                             match std::fs::write(&dest, md.as_bytes()) {
-                                Ok(()) => ui.status.set(lang::REMOTE_EXPORT_REPORT_DONE(
+                                Ok(()) => super::toast::ok(lang::REMOTE_EXPORT_REPORT_DONE(
                                     dest.display().to_string(),
                                 )),
-                                Err(e) => ui.error.set(e.to_string()),
+                                Err(e) => super::toast::err(e.to_string()),
                             }
                         }
                     },
@@ -413,17 +402,7 @@ pub fn build_remote_tab(ui: &RemoteUi) -> (Element, Element) {
         .child(Element::leaf().width(1).height(20).bg_role(Role::Divider))
         .child(qr_btn)
         .child(export_btn)
-        .child(Element::flex_spacer())
-        .child(
-            Element::label_signal(status)
-                .font_size(11.0)
-                .fg_role(Role::TextMuted),
-        )
-        .child(
-            Element::label_signal(error)
-                .font_size(11.0)
-                .fg_role(Role::Danger),
-        );
+        .child(Element::flex_spacer());
 
     // ── 当前端点行 ──
     let endpoint_row = Element::row()
@@ -474,7 +453,7 @@ pub fn build_remote_tab(ui: &RemoteUi) -> (Element, Element) {
     // ── 连接弹窗：网址输入 + 已存网址管理（下拉选择/保存/删除）+ 确定/取消 ──
     // 已存网址下拉：选中即回填输入框
     let url_opts = ui.url_sel.map({
-        let saved = ui.saved_urls.clone();
+        let saved = ui.saved_urls;
         move |idx: &usize| {
             let list = saved.get();
             if list.is_empty() {
@@ -488,9 +467,8 @@ pub fn build_remote_tab(ui: &RemoteUi) -> (Element, Element) {
         }
     });
     let url_pick = {
-        let saved = ui.saved_urls.clone();
-        let url_sel = ui.url_sel.clone();
-        let url_input = url_input.clone();
+        let saved = ui.saved_urls;
+        let url_sel = ui.url_sel;
         move |_: &mut windui::core::EventCtx| {
             if let Some(u) = saved.get().get(url_sel.get()) {
                 url_input.set(u.clone());
@@ -522,7 +500,7 @@ pub fn build_remote_tab(ui: &RemoteUi) -> (Element, Element) {
                             .width_match()
                             .weight(1.0)
                             .enabled_when({
-                                let urls = ui.saved_urls.clone();
+                                let urls = ui.saved_urls;
                                 move || !urls.get().is_empty()
                             })
                             .on_click(url_pick),
@@ -553,7 +531,7 @@ pub fn build_remote_tab(ui: &RemoteUi) -> (Element, Element) {
                             .neutral()
                             .danger()
                             .visible_when({
-                                let urls = ui.saved_urls.clone();
+                                let urls = ui.saved_urls;
                                 move || !urls.get().is_empty()
                             })
                             .on_click({
@@ -610,11 +588,9 @@ pub fn build_remote_tab(ui: &RemoteUi) -> (Element, Element) {
                             *endpoint.borrow_mut() = Some(ep.clone());
                             connected.set(true);
                             endpoint_display.set(display);
-                            status.set(String::new());
-                            error.set(String::new());
                             ui.clear_result();
                             // 解析成功即发起连接探测（TCP + 可选 TLS）
-                            remote::spawn_connect(sink(tx.clone()), ep);
+                            remote::spawn_connect(sink_opt(tx.clone()), ep);
                             show_conn.set(false);
                         }
                         // 解析失败：不关闭弹窗，错误在弹窗内显示
@@ -627,7 +603,7 @@ pub fn build_remote_tab(ui: &RemoteUi) -> (Element, Element) {
     // ── 响应体详情弹窗：结果区只留状态摘要，点「响应体」按钮检测完成后自动弹出；
     // 内容为「状态摘要 + 分隔线 + 截断的响应体预览」，只读可选可复制 ──
     let web_detail_dialog = input_dialog(
-        show_web_detail.clone(),
+        show_web_detail,
         lang::REMOTE_BODY(),
         620,
         move |_| show_web_detail.set(false),
@@ -719,9 +695,9 @@ pub fn build_remote_tab(ui: &RemoteUi) -> (Element, Element) {
                                 entry.h,
                                 &entry.rgba,
                             ) {
-                                Ok(Some(path)) => qr_error.set(lang::TOTP_PNG_SAVED(&path)),
+                                Ok(Some(path)) => super::toast::ok(lang::TOTP_PNG_SAVED(&path)),
                                 Ok(None) => {}
-                                Err(e) => qr_error.set(lang::TOTP_PNG_SAVE_FAIL(e)),
+                                Err(e) => super::toast::err(lang::TOTP_PNG_SAVE_FAIL(e)),
                             }
                         }
                     }),
@@ -738,15 +714,14 @@ pub fn build_remote_tab(ui: &RemoteUi) -> (Element, Element) {
                     .on_click(move |_| {
                         let text = qr_url.get();
                         if text.trim().is_empty() {
-                            qr_error.set(lang::REMOTE_QR_EMPTY().to_string());
+                            super::toast::err(lang::REMOTE_QR_EMPTY());
                             return;
                         }
                         match crate::core::qr::qr_rgba(text.trim()) {
                             Ok((rgba, w, h)) => {
                                 qr.set(vec![QrEntry { id: 0, rgba, w, h }]);
-                                qr_error.set(String::new());
                             }
-                            Err(e) => qr_error.set(e),
+                            Err(e) => super::toast::err(e),
                         }
                     }),
             ),

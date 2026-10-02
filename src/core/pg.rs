@@ -259,6 +259,10 @@ impl PgViewer {
                 }
                 Ok::<_, String>(schemas)
             })
+        })
+        .map_err(|e| {
+            crate::core::log::warn("pg", &format!("connect failed: {}", e));
+            e
         })?;
 
         self.schemas = schemas;
@@ -527,6 +531,255 @@ impl PgViewer {
         self.column_names = cols.clone();
         self.row_count = count;
         Ok((cols, count))
+    }
+
+    /// 检测表的单列主键（复合主键/无主键返回 None，导出时回退 OFFSET）
+    pub fn export_pk(&mut self, schema: &str, table: &str) -> Result<Option<String>, String> {
+        let db_source = db_source_for(
+            &TableRef {
+                db: String::new(),
+                schema: schema.to_string(),
+                table: table.to_string(),
+            },
+            &self.source,
+        );
+        let sch = schema.to_string();
+        let tbl = table.to_string();
+        run_query(&db_source, move |client| {
+            Box::pin(async move {
+                let rows = client
+                    .query(
+                        "SELECT a.attname \
+                         FROM pg_index i \
+                         JOIN pg_class c ON c.oid = i.indrelid \
+                         JOIN pg_namespace n ON n.oid = c.relnamespace \
+                         JOIN pg_attribute a ON a.attrelid = c.oid AND a.attnum = ANY(i.indkey) \
+                         WHERE i.indisprimary AND n.nspname = $1 AND c.relname = $2 \
+                         ORDER BY a.attnum",
+                        &[&sch, &tbl],
+                    )
+                    .await
+                    .map_err(|e| lang::ERR_TABLE_INFO(e.to_string()))?;
+                let cols: Vec<String> = rows.iter().map(|r| r.get(0)).collect();
+                Ok::<_, String>(if cols.len() == 1 {
+                    Some(cols[0].clone())
+                } else {
+                    None
+                })
+            })
+        })
+    }
+
+    /// 主键游标分批取行：WHERE pk > $1 ORDER BY pk（O(n)，不受中途增删行影响）。
+    /// 返回空批 = 已到表尾。仅适用单列主键（export_pk 返回 None 时上层回退 OFFSET）。
+    pub fn export_batch_keyset(
+        &mut self,
+        schema: &str,
+        table: &str,
+        pk_col: &str,
+        last_pk: Option<String>,
+        limit: usize,
+    ) -> Result<Vec<Vec<String>>, String> {
+        let tref = TableRef {
+            db: String::new(),
+            schema: schema.to_string(),
+            table: table.to_string(),
+        };
+        let db_source = db_source_for(&tref, &self.source);
+        let qualified = format!("{}.{}", quote_ident(schema), quote_ident(table));
+        let pk_col = pk_col.to_string();
+        run_query(&db_source, move |client| {
+            Box::pin(async move {
+                // 首批无游标：省略 WHERE（pk > NULL 恒为假，不能拼进去）
+                let mut sql = match &last_pk {
+                    None => format!(
+                        "SELECT * FROM {} ORDER BY {} LIMIT {}",
+                        qualified,
+                        quote_ident(&pk_col),
+                        limit
+                    ),
+                    Some(_) => format!(
+                        "SELECT * FROM {} WHERE {} > $1 ORDER BY {} LIMIT {}",
+                        qualified,
+                        quote_ident(&pk_col),
+                        quote_ident(&pk_col),
+                        limit
+                    ),
+                };
+                // simple_query 文本协议（timestamp/numeric/json 等全类型规范文本）
+                // 不支持参数绑定：游标值来自上一批读回的文本，数值原样、字符串转义后拼入
+                if let Some(s) = &last_pk {
+                    let lit = if s.parse::<i64>().is_ok() {
+                        s.clone()
+                    } else {
+                        format!("'{}'", s.replace('\'', "''"))
+                    };
+                    sql = sql.replacen("$1", &lit, 1);
+                }
+                let msgs = client
+                    .simple_query(&sql)
+                    .await
+                    .map_err(|e| lang::ERR_QUERY_DATA(e.to_string()))?;
+                use tokio_postgres::SimpleQueryMessage as M;
+                let ncols = msgs
+                    .iter()
+                    .find_map(|m| match m {
+                        M::Row(row) => Some(row.columns().len()),
+                        _ => None,
+                    })
+                    .unwrap_or(0);
+                Ok(msgs
+                    .iter()
+                    .filter_map(|m| match m {
+                        M::Row(row) => Some(
+                            (0..ncols)
+                                .map(|i| row.get(i).unwrap_or("NULL").to_string())
+                                .collect::<Vec<String>>(),
+                        ),
+                        _ => None,
+                    })
+                    .collect())
+            })
+        })
+    }
+
+    /// 读取建表 DDL：单表/整库都走 information_schema.columns 合成
+    /// CREATE TABLE（PG 无 SHOW CREATE TABLE；列名/类型/可空/默认值/主键齐全），
+    /// 整库时附带视图定义
+    pub fn export_ddl(&mut self, schema: &str, table: Option<&str>) -> Result<Vec<String>, String> {
+        let sch = schema.to_string();
+        let tbl = table.map(|t| t.to_string());
+        let db_source = match &tbl {
+            Some(t) => db_source_for(
+                &TableRef {
+                    db: String::new(),
+                    schema: sch.clone(),
+                    table: t.clone(),
+                },
+                &self.source,
+            ),
+            None => self.source.clone(),
+        };
+        run_query(&db_source, move |client| {
+            Box::pin(async move {
+                let targets: Vec<String> = match &tbl {
+                    Some(t) => vec![t.clone()],
+                    None => client
+                        .query(
+                            "SELECT c.relname FROM pg_class c \
+                             JOIN pg_namespace n ON n.oid = c.relnamespace \
+                             WHERE c.relkind IN ('r', 'p') \
+                               AND n.nspname = $1 \
+                             ORDER BY c.relname",
+                            &[&sch],
+                        )
+                        .await
+                        .map_err(|e| lang::ERR_TABLE_INFO(e.to_string()))?
+                        .iter()
+                        .map(|r| r.get(0))
+                        .collect(),
+                };
+                let mut ddl = Vec::new();
+                for t in &targets {
+                    let rows = client
+                        .query(
+                            "SELECT c.column_name, c.data_type, c.character_maximum_length, \
+                                    c.numeric_precision, c.numeric_scale, c.is_nullable, \
+                                    c.column_default \
+                             FROM information_schema.columns c \
+                             WHERE c.table_schema = $1 AND c.table_name = $2 \
+                             ORDER BY c.ordinal_position",
+                            &[&sch, t],
+                        )
+                        .await
+                        .map_err(|e| lang::ERR_TABLE_INFO(e.to_string()))?;
+                    if rows.is_empty() {
+                        continue;
+                    }
+                    let mut lines: Vec<String> = Vec::new();
+                    let mut pk_cols: Vec<String> = Vec::new();
+                    for r in &rows {
+                        let name: String = r.get(0);
+                        let dtype: String = r.get(1);
+                        let char_len: Option<i32> = r.get(2);
+                        let num_prec: Option<i32> = r.get(3);
+                        let num_scale: Option<i32> = r.get(4);
+                        let nullable: String = r.get(5);
+                        let default: Option<String> = r.get(6);
+                        // 类型合成：varchar/char 带长度，numeric 带精度
+                        let ty = match (dtype.as_str(), char_len, num_prec, num_scale) {
+                            ("character varying", Some(l), _, _) => format!("varchar({})", l),
+                            ("character", Some(l), _, _) => format!("char({})", l),
+                            ("numeric", _, Some(p), Some(s)) => {
+                                format!("numeric({},{})", p, s)
+                            }
+                            ("numeric", _, Some(p), None) => format!("numeric({})", p),
+                            (d, _, _, _) => d.to_string(),
+                        };
+                        let mut line = format!("    {} {}", quote_ident(&name), ty);
+                        if nullable == "NO" {
+                            line.push_str(" NOT NULL");
+                        }
+                        if let Some(d) = default {
+                            line.push_str(&format!(" DEFAULT {}", d));
+                        }
+                        lines.push(line);
+                    }
+                    // 主键列
+                    if let Ok(pk_rows) = client
+                        .query(
+                            "SELECT a.attname \
+                             FROM pg_index i \
+                             JOIN pg_class c ON c.oid = i.indrelid \
+                             JOIN pg_namespace n ON n.oid = c.relnamespace \
+                             JOIN pg_attribute a ON a.attrelid = c.oid AND a.attnum = ANY(i.indkey) \
+                             WHERE i.indisprimary AND n.nspname = $1 AND c.relname = $2 \
+                             ORDER BY a.attnum",
+                            &[&sch, t],
+                        )
+                        .await
+                    {
+                        pk_cols = pk_rows.iter().map(|r| r.get(0)).collect();
+                    }
+                    if !pk_cols.is_empty() {
+                        let cols: Vec<String> = pk_cols.iter().map(|c| quote_ident(c)).collect();
+                        lines.push(format!("    PRIMARY KEY ({})", cols.join(", ")));
+                    }
+                    ddl.push(format!(
+                        "CREATE TABLE {}.{} (\n{}\n);\n",
+                        quote_ident(&sch),
+                        quote_ident(t),
+                        lines.join(",\n")
+                    ));
+                }
+                // 视图定义（整库导出时附带）
+                if tbl.is_none() {
+                    if let Ok(vrows) = client
+                        .query(
+                            "SELECT viewname, definition FROM pg_views \
+                             WHERE schemaname = $1 ORDER BY viewname",
+                            &[&sch],
+                        )
+                        .await
+                    {
+                        for r in vrows {
+                            let name: String = r.get(0);
+                            let def: String = r.get(1);
+                            let def = def.trim_end_matches(';').trim();
+                            if !def.is_empty() {
+                                ddl.push(format!(
+                                    "CREATE VIEW {}.{} AS {};\n",
+                                    quote_ident(&sch),
+                                    quote_ident(&name),
+                                    def
+                                ));
+                            }
+                        }
+                    }
+                }
+                Ok::<_, String>(ddl)
+            })
+        })
     }
 
     /// 导出专用：大批量取行（不经页缓存）

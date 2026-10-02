@@ -11,14 +11,14 @@ use crate::lang;
 /// 实际物理像素 1:1 现画，避免固定位图交给系统缩放导致高 DPI 发糊。
 pub(crate) fn app_icon() -> windui::icon::IconSource {
     windui::icon::IconSource::sized(|size| {
-        // Image::from_svg_bytes 返回 Result；失败走 1×1 透明像素兜底
+        // Image::from_svg_bytes 返回 Result；失败依次回落：
+        // 内置品牌图标（windui 自带，必然成功）→ 1×1 透明像素
         windui::render::image::Image::from_svg_bytes(icons::LOGO, Some(size))
             .ok()
             .and_then(|img| windui::icon::WindowIcon::from_image(&img))
             .unwrap_or_else(|| {
-                // 解析失败兜底：1×1 透明像素（正常不会走到）
                 windui::icon::WindowIcon::from_rgba(1, 1, vec![0, 0, 0, 0])
-                    .expect("1×1 RGBA 必然合法")
+                    .unwrap_or_else(|| windui::icon::brand_icon_at(1))
             })
     })
 }

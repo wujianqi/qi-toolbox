@@ -33,9 +33,8 @@ pub fn install() {
 }
 
 /// 运行期语言句柄：克隆进控件回调，`set` 热切换，下一帧整树跟随。
+#[allow(unused_imports)] // re-export：供 layout.rs 等以 lang::LocaleHandle 引用
 pub use windui::i18n::LocaleHandle;
-
-/// 当前语言是否中文（供「中 / EN」toggle 显示与日志用）。
 pub fn is_zh() -> bool {
     windui::i18n::language().starts_with("zh")
 }
@@ -111,6 +110,18 @@ pub fn SFTP_USER() -> String {
 }
 pub fn SFTP_PASS() -> String {
     text("sftp.pass")
+}
+pub fn SFTP_KEY_PATH() -> String {
+    text("sftp.key_path")
+}
+pub fn SFTP_KEY_READ_FAIL(path: String, e: String) -> String {
+    cat().format(&msg("sftp.key_read_fail").push(path).push(e))
+}
+pub fn SFTP_KEY_DECODE_FAIL(e: String) -> String {
+    cat().format(&msg("sftp.key_decode_fail").push(e))
+}
+pub fn SFTP_HOST_CHANGED(host: String, fp: String, saved: String) -> String {
+    cat().format(&msg("sftp.host_changed").push(host).push(fp).push(saved))
 }
 pub fn SFTP_CONNECT() -> String {
     text("sftp.connect")
@@ -219,6 +230,45 @@ pub fn SFTP_ERR_UPLOAD(e: impl Into<ArgValue>) -> String {
 }
 pub fn SFTP_ERR_DOWNLOAD(e: impl Into<ArgValue>) -> String {
     cat().format(&msg("sftp.err_download").push(e))
+}
+pub fn SFTP_ERR_CHMOD(e: impl Into<ArgValue>) -> String {
+    cat().format(&msg("sftp.err_chmod").push(e))
+}
+pub fn SFTP_DONE_CHMOD() -> String {
+    text("sftp.done_chmod")
+}
+pub fn SFTP_PERM() -> String {
+    text("sftp.perm")
+}
+pub fn SFTP_PERM_TITLE() -> String {
+    text("sftp.perm_title")
+}
+pub fn SFTP_PERM_OWNER() -> String {
+    text("sftp.perm_owner")
+}
+pub fn SFTP_PERM_GROUP() -> String {
+    text("sftp.perm_group")
+}
+pub fn SFTP_PERM_OTHERS() -> String {
+    text("sftp.perm_others")
+}
+pub fn SFTP_PERM_READ() -> String {
+    text("sftp.perm_read")
+}
+pub fn SFTP_PERM_WRITE() -> String {
+    text("sftp.perm_write")
+}
+pub fn SFTP_PERM_EXEC() -> String {
+    text("sftp.perm_exec")
+}
+pub fn SFTP_PERM_OF(name: impl Into<ArgValue>) -> String {
+    cat().format(&msg("sftp.perm_of").push(name))
+}
+pub fn SFTP_PERM_NO_PERM() -> String {
+    text("sftp.perm_no_perm")
+}
+pub fn SFTP_PERM_APPLY_TIP() -> String {
+    text("sftp.perm_apply_tip")
 }
 pub fn SFTP_DONE_MKDIR() -> String {
     text("sftp.done_mkdir")
@@ -510,6 +560,42 @@ pub fn SFTP_BMK_DEL() -> String {
 pub fn SQL_HISTORY() -> String {
     text("remote.sql_history")
 }
+pub fn SQL_SAVED() -> String {
+    text("sql.saved")
+}
+pub fn SQL_SAVED_EMPTY() -> String {
+    text("sql.saved_empty")
+}
+pub fn SQL_SAVED_ADD() -> String {
+    text("sql.saved_add")
+}
+pub fn SQL_SAVED_DEL_BTN() -> String {
+    text("sql.saved_del_btn")
+}
+pub fn SQL_SAVED_DONE(name: String) -> String {
+    cat().format(&msg("sql.saved_done").push(name))
+}
+pub fn SQL_SAVED_UNTITLED() -> String {
+    text("sql.saved_untitled")
+}
+pub fn SQL_MGR_BTN() -> String {
+    text("sql.mgr_btn")
+}
+pub fn SQL_MGR_TITLE() -> String {
+    text("sql.mgr_title")
+}
+pub fn SQL_READONLY() -> String {
+    text("sql.readonly")
+}
+pub fn SQL_READONLY_ON() -> String {
+    text("sql.readonly_on")
+}
+pub fn SQL_READONLY_OFF() -> String {
+    text("sql.readonly_off")
+}
+pub fn SQL_READONLY_BLOCKED() -> String {
+    text("sql.readonly_blocked")
+}
 pub fn SQL_HISTORY_EMPTY() -> String {
     text("remote.sql_history_empty")
 }
@@ -637,6 +723,9 @@ pub fn ABOUT_GOTO_RELEASES() -> String {
 pub fn ABOUT_CHECK_UPDATE() -> String {
     text("about.check_update")
 }
+pub fn ABOUT_OPEN_LOGS() -> String {
+    text("about.open_logs")
+}
 pub fn ABOUT_UP_TO_DATE() -> String {
     text("about.up_to_date")
 }
@@ -686,6 +775,9 @@ pub fn PWD_SQL_LABEL() -> String {
 }
 pub fn PWD_SAVE() -> String {
     text("pwd.save")
+}
+pub fn PWD_SAVE_NEED_ENCRYPT() -> String {
+    text("pwd.save_need_encrypt")
 }
 pub fn PWD_USED_FOR() -> String {
     text("pwd.used_for")
@@ -832,6 +924,36 @@ pub fn TOTP_PNG_SAVED(path: &str) -> String {
 pub fn TOTP_PNG_SAVE_FAIL(e: String) -> String {
     cat().format(&msg("totp.png_save_fail").push(e))
 }
+pub fn TOTP_IMPORT() -> String {
+    text("totp.import")
+}
+pub fn TOTP_IMPORT_HINT() -> String {
+    text("totp.import_hint")
+}
+pub fn TOTP_IMPORT_DONE(name: String) -> String {
+    cat().format(&msg("totp.import_done").push(name))
+}
+pub fn TOTP_IMPORT_BAD_PREFIX() -> String {
+    text("totp.import_bad_prefix")
+}
+pub fn TOTP_IMPORT_UNSUPPORTED(t: String) -> String {
+    cat().format(&msg("totp.import_unsupported").push(t))
+}
+pub fn TOTP_IMPORT_NO_SECRET() -> String {
+    text("totp.import_no_secret")
+}
+pub fn TOTP_COPIED() -> String {
+    text("totp.copied")
+}
+pub fn TOTP_AUTO_COPY_LABEL() -> String {
+    text("totp.auto_copy_label")
+}
+pub fn TOTP_AUTO_COPY_ON() -> String {
+    text("totp.auto_copy_on")
+}
+pub fn TOTP_AUTO_COPY_OFF() -> String {
+    text("totp.auto_copy_off")
+}
 
 // ────────────────────── S3 页 ──────────────────────
 pub fn S3_TAB() -> String {
@@ -869,6 +991,18 @@ pub fn S3_UPLOAD() -> String {
 }
 pub fn S3_DOWNLOAD() -> String {
     text("s3.download")
+}
+pub fn S3_PRESIGN() -> String {
+    text("s3.presign")
+}
+pub fn S3_PRESIGN_DONE() -> String {
+    text("s3.presign_done")
+}
+pub fn S3_PRESIGN_NO_KEY() -> String {
+    text("s3.presign_no_key")
+}
+pub fn S3_FILTER_HINT() -> String {
+    text("s3.filter_hint")
 }
 pub fn S3_UPLOADING() -> String {
     text("s3.uploading")
@@ -1163,6 +1297,15 @@ pub fn DT_EXPORT() -> String {
 pub fn DT_EXPORT_TITLE() -> String {
     text("dt.export_title")
 }
+pub fn DT_EXPORT_SQL() -> String {
+    text("dt.export_sql")
+}
+pub fn DT_EXPORT_SCHEMA() -> String {
+    text("dt.export_schema")
+}
+pub fn DT_EXPORT_SCHEMA_TITLE() -> String {
+    text("dt.export_schema_title")
+}
 pub fn TURSO_EXPORT_STARTED(done: impl Into<ArgValue>, total: impl Into<ArgValue>) -> String {
     cat().format(&msg("dt.export_started").push(done).push(total))
 }
@@ -1228,6 +1371,30 @@ pub fn ERR_ARGON2_HASH(e: impl Into<ArgValue>) -> String {
 pub fn ERR_BCRYPT_HASH(e: impl Into<ArgValue>) -> String {
     cat().format(&msg("err.bcrypt_hash").push(e))
 }
+pub fn ERR_B64(e: impl Into<ArgValue>) -> String {
+    cat().format(&msg("err.b64").push(e))
+}
+pub fn ERR_HASH_UNKNOWN() -> String {
+    text("err.hash_unknown")
+}
+pub fn ERR_HASH_MALFORMED() -> String {
+    text("err.hash_malformed")
+}
+pub fn PWD_VERIFY() -> String {
+    text("pwd_verify.verify")
+}
+pub fn PWD_VERIFY_HASH_HINT() -> String {
+    text("pwd_verify.verify_hash_hint")
+}
+pub fn PWD_VERIFY_OK(algo: String) -> String {
+    cat().format(&msg("pwd_verify.verify_ok").push(algo))
+}
+pub fn PWD_VERIFY_FAIL(algo: String) -> String {
+    cat().format(&msg("pwd_verify.verify_fail").push(algo))
+}
+pub fn PWD_HASH_UNKNOWN_ALGO() -> String {
+    text("pwd_verify.hash_unknown_algo")
+}
 
 // ────────────────────── 通用（可选文本右键菜单）──────────────────────
 pub fn MENU_COPY() -> String {
@@ -1235,4 +1402,100 @@ pub fn MENU_COPY() -> String {
 }
 pub fn MENU_SELECT_ALL() -> String {
     text("menu.select_all")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{EN, ZH_CN};
+    use windui::i18n::lint;
+
+    /// 两份译文必须可解析且互相一致：key 集合一致、占位符一致、变体齐全。
+    /// TOML 写坏（语法错误、漏 key、占位符名字对不上）在这里当场报出，
+    /// 而不是上线后界面冒出原文/空串。
+    #[test]
+    fn locale_files_parse_and_match() {
+        let problems = lint::check(&[ZH_CN, EN]);
+        assert!(
+            problems.is_empty(),
+            "i18n 译文存在不一致：\n{}",
+            problems.join("\n")
+        );
+    }
+
+    /// 用与 `install()` 相同的方式构建目录：每种语言的关键 key 应能取到非原文回退的译文。
+    #[test]
+    fn locales_build_and_resolve() {
+        let locales = windui::i18n::Locales::builder()
+            .embed(ZH_CN)
+            .embed(EN)
+            .build();
+        // 语言 id 均来自各文件 [meta] locale
+        let ids: Vec<String> = locales.available().into_iter().map(|l| l.id).collect();
+        assert!(ids.contains(&"zh-CN".to_string()), "缺 zh-CN：{ids:?}");
+        assert!(ids.contains(&"en".to_string()), "缺 en：{ids:?}");
+
+        // zh-CN 缺的 key 回退到 en（meta.fallback = "en"）；双方都有则各自成文
+        let zh = locales.catalog("zh-CN");
+        assert_eq!(zh.text("app.name"), "奇兔宝");
+        assert_eq!(zh.text("tab.about"), "关于软件");
+        let en = locales.catalog("en");
+        assert_eq!(en.text("app.name"), "Qi Toolbox");
+        assert!(
+            !en.text("tab.about").contains("tab.about"),
+            "miss 时 key 原样返回"
+        );
+    }
+}
+
+// ────────────────────── 运维备忘页 ──────────────────────
+pub fn MEMO_TAB() -> String {
+    text("memo.tab")
+}
+pub fn MEMO_EMPTY() -> String {
+    text("memo.empty")
+}
+pub fn MEMO_NEW() -> String {
+    text("memo.new")
+}
+pub fn MEMO_SAVE() -> String {
+    text("memo.save")
+}
+pub fn MEMO_DELETE() -> String {
+    text("memo.delete")
+}
+pub fn MEMO_TITLE_PH() -> String {
+    text("memo.title_ph")
+}
+pub fn MEMO_CONTENT_PH() -> String {
+    text("memo.content_ph")
+}
+pub fn MEMO_DAY() -> String {
+    text("memo.day")
+}
+pub fn MEMO_SAVED() -> String {
+    text("memo.saved")
+}
+pub fn MEMO_DELETED() -> String {
+    text("memo.deleted")
+}
+pub fn MEMO_CALENDAR() -> String {
+    text("memo.calendar")
+}
+pub fn MEMO_TODAY() -> String {
+    text("memo.today")
+}
+pub fn MEMO_ALL() -> String {
+    text("memo.all")
+}
+pub fn MEMO_LIST_TITLE() -> String {
+    text("memo.list_title")
+}
+pub fn MEMO_EMPTY_DAY(day: impl Into<ArgValue>) -> String {
+    cat().format(&msg("memo.empty_day").push(day))
+}
+pub fn MEMO_EDIT_TITLE() -> String {
+    text("memo.edit_title")
+}
+pub fn MEMO_NEW_TITLE() -> String {
+    text("memo.new_title")
 }

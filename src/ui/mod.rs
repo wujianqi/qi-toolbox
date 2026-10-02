@@ -26,6 +26,7 @@ mod db_page;
 mod icons;
 mod layout;
 pub(crate) mod master;
+mod memo;
 mod mysql;
 /// 侧栏导航项 / 主题按钮 / 关于页（原 widgets 中导航相关部分）。
 mod nav;
@@ -40,6 +41,7 @@ mod sql;
 mod ssh_cmd;
 mod table;
 mod theme;
+pub(crate) mod toast;
 mod totp;
 mod turso;
 
@@ -71,7 +73,7 @@ pub(crate) fn update_status() -> Signal<UpdateStatus> {
         if !v.is_alive() {
             *v = signal(UpdateStatus::Idle);
         }
-        v.clone()
+        *v
     })
 }
 
@@ -80,7 +82,7 @@ thread_local! {
         std::cell::RefCell::new(signal(UpdateStatus::Idle));
     /// 更新检查通道发送端：run() 注册 channel 后存入，手动「检查更新」按钮借用。
     static UPDATE_TX: std::cell::RefCell<Option<Sender<UpdateMsg>>> =
-        std::cell::RefCell::new(None);
+        const { std::cell::RefCell::new(None) };
 }
 
 /// 更新检查通道消息（后台线程 → UI 线程；Signal 非 Send，不能跨线程直接 set）。
@@ -114,11 +116,12 @@ pub(crate) fn spawn_update_check() {
 /// 新增页面只需在此挂一个状态 struct，页面自己的信号/消息处理都在对应文件里。
 #[derive(Clone)]
 struct AppState {
-    /// 当前导航页（模块 id：0=TOTP 1=密码 2=Turso 3=SFTP 4=远程 5=关于 6=S3 7=MySQL 8=PG；
-    /// 内容页按 id 显隐，与侧栏显示顺序解耦）
+    /// 当前导航页（模块 id：0=TOTP 1=密码 2=Turso 3=SFTP 4=远程 5=关于 6=S3 7=MySQL 8=PG
+    /// 9=备忘；内容页按 id 显隐，与侧栏显示顺序解耦）
     tab: Signal<usize>,
     /// 侧栏菜单顺序：模块 id 序列（拖拽可调，持久化到 AppData，启动回填）。
-    /// 默认 SFTP/SSH、Turso 置顶，S3 第三行（高频功能优先），其余按原相对顺序跟随。
+    /// 默认 SFTP/SSH、Turso 置顶，S3 第三行（高频功能优先）；
+    /// 备忘倒数第二（关于软件之上）。
     nav_order: Signal<Vec<usize>>,
     /// 左侧菜单显示/隐藏（折叠手柄切换，持久化到 AppData）
     sidebar_visible: Signal<bool>,
@@ -137,6 +140,7 @@ struct AppState {
     pg: pg::PgUi,
     sftp: sftp::SftpUi,
     s3: s3::S3Ui,
+    memo: memo::MemoUi,
     remote: remote::RemoteUi,
     /// 主口令门控（首次设置 / 换环境解锁弹窗）
     master_gate: master::MasterGate,
@@ -149,7 +153,7 @@ impl AppState {
         let master_gate = master::MasterGate::init();
         let s = Self {
             tab: signal(0usize),
-            nav_order: signal(vec![3, 6, 2, 7, 8, 0, 1, 4, 5]),
+            nav_order: signal(vec![3, 6, 2, 7, 8, 0, 1, 4, 9, 5]),
             sidebar_visible: signal(true),
             theme_mode: signal(if system_light_theme() { 0 } else { 1 }),
             theme_epoch: signal(vec![()]),
@@ -161,21 +165,22 @@ impl AppState {
             pg: pg::PgUi::new(),
             sftp: sftp::SftpUi::new(),
             s3: s3::S3Ui::new(),
+            memo: memo::MemoUi::new(),
             remote: remote::RemoteUi::new(),
             master_gate,
         };
         // ── 回填上次输入：AppData 记忆缓存（core::settings），尽力而为 ──
         // 文本输入为空时跳过（无记忆价值，保留默认占位）；数值/下拉索引做越界防护。
         let saved = core::settings::load();
-        // ── 恢复侧栏菜单顺序（逗号分隔的模块 id；须 9 个且无重复才采纳）──
+        // ── 恢复侧栏菜单顺序（逗号分隔的模块 id；须 10 个且无重复才采纳）──
         if let Some(v) = saved.get("nav.order") {
             let ids: Vec<usize> = v
                 .split(',')
                 .filter_map(|p| p.trim().parse::<usize>().ok())
-                .filter(|&i| i < 9)
+                .filter(|&i| i < 10)
                 .collect();
-            let mut seen = [false; 9];
-            let ok = ids.len() == 9
+            let mut seen = [false; 10];
+            let ok = ids.len() == 10
                 && ids.iter().all(|&i| {
                     if seen[i] {
                         false
@@ -184,12 +189,10 @@ impl AppState {
                         true
                     }
                 });
-            if ok {
-                // 旧 7 项顺序视为「未含 MySQL/PG」，迁移到新默认（追加在 S3 之后）；
-                // 已含 9 项的用户拖拽顺序原样保留。
-                if ids.len() == 9 && ids != [0, 1, 2, 3, 4, 5, 6, 7, 8] {
-                    s.nav_order.set(ids);
-                }
+            // 旧默认顺序（备忘在密码之后）视为未定制，迁移到新默认（备忘倒数第二）；
+            // 其余用户拖拽顺序原样保留。
+            if ok && ids != [0, 1, 2, 3, 4, 5, 6, 7, 8, 9] {
+                s.nav_order.set(ids);
             }
         }
         // ── 默认模块 = 菜单第一项：用户改过菜单则以当前菜单顺序为准 ──
@@ -254,6 +257,14 @@ pub(crate) fn sink<T: Send + 'static>(tx: Sender<T>) -> core::MsgSink<T> {
     })
 }
 
+/// Option 版 sink：通道未回填时消息静默丢弃（不 panic）。
+pub(crate) fn sink_opt<T: Send + 'static>(tx: Option<Sender<T>>) -> core::MsgSink<T> {
+    match tx {
+        Some(tx) => sink(tx),
+        None => Box::new(|_| {}),
+    }
+}
+
 // ══════════════════════════════════════════════════════════════════
 // 应用入口：创建全部状态信号 + 注册后台任务通道，构建 Element 树，运行窗口
 // ══════════════════════════════════════════════════════════════════
@@ -273,6 +284,9 @@ pub fn run() {
         } else {
             theme::dark()
         });
+
+    // 全局 toast 通道：各页消息处理（无 EventCtx 的 on_msg）经此弹轻提示
+    toast::register(&mut app);
 
     // 更新检查通道：后台线程请求 GitHub Releases，结果回 UI 线程写状态信号
     // （Signal 非 Send，不能跨线程直接 set）；发送端存全局，供手动「检查更新」复用

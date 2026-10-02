@@ -31,7 +31,7 @@ pub fn on_db_msg_shared(
                 signals.pending.set(None);
                 signals.table_loading.set(true);
                 core::db::spawn_load_table_grouped(
-                    crate::ui::sink(signals.tx()),
+                    crate::ui::sink_opt(signals.tx()),
                     (hooks.make_db_source)(),
                     g,
                     t,
@@ -41,13 +41,13 @@ pub fn on_db_msg_shared(
             true
         }
         core::db::DbMsg::TableLoaded(Err(e)) => {
-            signals.error.set(e);
+            super::toast::err(e);
             signals.table_loading.set(false);
             if let Some((g, t, off)) = signals.pending.get() {
                 signals.pending.set(None);
                 signals.table_loading.set(true);
                 core::db::spawn_load_table_grouped(
-                    crate::ui::sink(signals.tx()),
+                    crate::ui::sink_opt(signals.tx()),
                     (hooks.make_db_source)(),
                     g,
                     t,
@@ -62,12 +62,11 @@ pub fn on_db_msg_shared(
                 .clone()
                 .unwrap_or_else(|| lang::TURSO_SQL_STATUS(page.columns.len(), page.row_count));
             apply_page(&page, signals);
-            signals.sql_status.set(status);
-            signals.error.set(String::new());
+            super::toast::ok(status);
             true
         }
         core::db::DbMsg::SqlDone(Err(e)) => {
-            signals.sql_status.set(format!("\u{274C} {}", e));
+            super::toast::err(e);
             true
         }
         core::db::DbMsg::ExportProgress { done, total } => {
@@ -76,12 +75,12 @@ pub fn on_db_msg_shared(
         }
         core::db::DbMsg::ExportDone(Ok(path)) => {
             signals.export_progress.set(Vec::new());
-            signals.status.set((hooks.export_done_text)(&path));
+            super::toast::ok((hooks.export_done_text)(&path));
             true
         }
         core::db::DbMsg::ExportDone(Err(e)) => {
             signals.export_progress.set(Vec::new());
-            signals.error.set(e);
+            super::toast::err(e);
             true
         }
         _ => false,
@@ -111,7 +110,6 @@ pub fn apply_page(page_data: &core::db::TablePage, s: &DbPageSignals) {
         sql_status: None,
     }]);
     s.table_rows.set(rows.clone());
-    s.error.set(String::new());
 }
 
 /// 三页共享的信号集合（分组型：MySQL/PG；Turso 平铺表不走本骨架）。
@@ -123,26 +121,26 @@ pub struct DbPageSignals {
     pub table_meta: Signal<Vec<core::db::TablePage>>,
     pub table_rows: Signal<Vec<Vec<String>>>,
     pub table_title: Signal<String>,
-    pub status: Signal<String>,
-    pub error: Signal<String>,
-    pub sql_status: Signal<String>,
     pub table_loading: Signal<bool>,
     pub pending: Signal<Option<(String, String, usize)>>,
     pub export_progress: Signal<Vec<(usize, usize)>>,
-    pub tx: Sender<core::db::DbMsg>,
+    pub tx: Option<Sender<core::db::DbMsg>>,
 }
 
 impl DbPageSignals {
-    pub fn tx(&self) -> Sender<core::db::DbMsg> {
+    pub fn tx(&self) -> Option<Sender<core::db::DbMsg>> {
         self.tx.clone()
     }
 }
 
+/// ConnectedGroups 回调签名：结果 + 本页信号集
+pub type OnConnectedGroups =
+    dyn Fn(Result<(Vec<(String, Vec<String>)>, String), String>, &DbPageSignals);
+
 /// 各页差异注入点
 pub struct DbPageHooks {
     /// ConnectedGroups 成功：失效本页连接缓存、写 groups/connected/标题/状态文案
-    pub on_connected_groups:
-        Box<dyn Fn(Result<(Vec<(String, Vec<String>)>, String), String>, &DbPageSignals)>,
+    pub on_connected_groups: Box<OnConnectedGroups>,
     /// 构造统一连接源（按当前选中站点/输入）
     pub make_db_source: Box<dyn Fn() -> DbSource>,
     /// 导出完成文案（各页文案函数不同）

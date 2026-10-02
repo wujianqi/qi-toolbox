@@ -166,3 +166,28 @@ pub(crate) fn protect(plain: &[u8]) -> Result<Vec<u8>, String> {
 pub(crate) fn unprotect(cipher: &[u8]) -> Result<Vec<u8>, String> {
     crate::core::master::unprotect(cipher)
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// 敏感键注册表：登记的键命中、大小写敏感、未登记的键不误伤
+    #[test]
+    fn secret_key_registry() {
+        for k in [
+            "sftp.pass",
+            "turso.token",
+            "totp.key",
+            "pwd.input",
+            "mysql.pass",
+            "pg.pass",
+        ] {
+            assert!(is_secret_key(k), "{} 应命中敏感键", k);
+        }
+        // 未登记的键与变体不得误伤（否则明文/加密路径判断错乱）
+        assert!(!is_secret_key("sftp.host"));
+        assert!(!is_secret_key("SFTP.PASS"));
+        assert!(!is_secret_key("sftp.password"));
+        assert!(!is_secret_key(""));
+    }
+}

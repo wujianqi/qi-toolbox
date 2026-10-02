@@ -40,9 +40,9 @@ mod tests {
             20,
             "真实高度但不达 min → 取 min"
         );
-        assert_eq!(has_real_height(1), true);
-        assert_eq!(has_real_height(0), false);
-        assert_eq!(has_real_height(-5), false);
+        assert!(has_real_height(1));
+        assert!(!has_real_height(0));
+        assert!(!has_real_height(-5));
     }
 
     /// 无约束 / 哨兵值 → 回退固有高度（不低于 min）。

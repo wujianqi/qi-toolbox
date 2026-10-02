@@ -211,6 +211,140 @@ fn hash_md5(password: &str) -> Result<String, String> {
     Ok(format!("{:x}", md5::compute(password.as_bytes())))
 }
 
+/// 校验密码与哈希是否匹配（自动识别哈希格式；MD5 直接比对）。
+/// 各格式参数从哈希串解析，与生成端格式一一对应。
+pub fn verify_password(password: &str, hash: &str) -> Result<bool, String> {
+    let hash = hash.trim();
+    if hash.starts_with("$argon2id$")
+        || hash.starts_with("$argon2i$")
+        || hash.starts_with("$argon2d$")
+    {
+        return verify_argon2(password, hash);
+    }
+    if hash.starts_with("$2a$") || hash.starts_with("$2b$") || hash.starts_with("$2y$") {
+        // bcrypt crate 原生 verify（自带常量时间比较）
+        return bcrypt::verify(password, hash).map_err(|e| lang::ERR_BCRYPT_HASH(e.to_string()));
+    }
+    if hash.starts_with("$pbkdf2-sha256$") {
+        return verify_pbkdf2(password, hash);
+    }
+    // MD5：32 位十六进制直接比对
+    if hash.len() == 32 && hash.chars().all(|c| c.is_ascii_hexdigit()) {
+        return Ok(hash_password(password, HashAlgorithm::Md5)? == hash.to_ascii_lowercase());
+    }
+    Err(lang::ERR_HASH_UNKNOWN())
+}
+
+/// 解析 PHC 参数段 "m=19456,t=2,p=1" → (m, t, p)；缺项用默认值
+fn parse_phc_params(params: &str) -> (u32, u32, u32) {
+    let (mut m, mut t, mut p) = (19456u32, 2u32, 1u32);
+    for kv in params.split(',') {
+        let Some((k, v)) = kv.split_once('=') else {
+            continue;
+        };
+        match k {
+            "m" => m = v.parse().unwrap_or(m),
+            "t" => t = v.parse().unwrap_or(t),
+            "p" => p = v.parse().unwrap_or(p),
+            _ => {}
+        }
+    }
+    (m, t, p)
+}
+
+/// 解析 Base64（无 padding 容错）
+fn b64_decode(s: &str) -> Result<Vec<u8>, String> {
+    // base64ct 要求规范长度，手动补 padding
+    let padded = match s.len() % 4 {
+        2 => format!("{s}=="),
+        3 => format!("{s}="),
+        _ => s.to_string(),
+    };
+    Base64::decode_vec(&padded).map_err(|e| lang::ERR_B64(e.to_string()))
+}
+
+/// Argon2（id/i/d 变体）校验：格式 $argon2id$v=19$m=..,t=..,p=..$salt_b64$hash_b64
+fn verify_argon2(password: &str, hash: &str) -> Result<bool, String> {
+    let parts: Vec<&str> = hash.split('$').filter(|s| !s.is_empty()).collect();
+    // parts: [argon2id, v=19, m=..., salt, hash]
+    if parts.len() < 5 {
+        return Err(lang::ERR_HASH_MALFORMED());
+    }
+    let variant = match parts[0] {
+        "argon2id" => argon2::Algorithm::Argon2id,
+        "argon2i" => argon2::Algorithm::Argon2i,
+        "argon2d" => argon2::Algorithm::Argon2d,
+        _ => return Err(lang::ERR_HASH_MALFORMED()),
+    };
+    let (m, t, p) = parse_phc_params(parts[2]);
+    let params =
+        argon2::Params::new(m, t, p, None).map_err(|e| lang::ERR_ARGON2_PARAM(e.to_string()))?;
+    let argon2 = Argon2::new(variant, argon2::Version::V0x13, params);
+    let salt = b64_decode(parts[3])?;
+    let expected = b64_decode(parts[4])?;
+    let mut out = vec![0u8; expected.len()];
+    argon2
+        .hash_password_into(password.as_bytes(), &salt, &mut out)
+        .map_err(|e| lang::ERR_ARGON2_HASH(e.to_string()))?;
+    // 常量时间比较
+    Ok(subtle_ct_eq(&out, &expected))
+}
+
+/// PBKDF2-SHA256 校验：格式 $pbkdf2-sha256$<rounds>$salt_b64$hash_b64
+fn verify_pbkdf2(password: &str, hash: &str) -> Result<bool, String> {
+    let parts: Vec<&str> = hash.split('$').filter(|s| !s.is_empty()).collect();
+    // parts: [pbkdf2-sha256, rounds, salt, hash]
+    if parts.len() != 4 {
+        return Err(lang::ERR_HASH_MALFORMED());
+    }
+    let rounds: u32 = parts[1].parse().map_err(|_| lang::ERR_HASH_MALFORMED())?;
+    let salt = b64_decode(parts[2])?;
+    let expected = b64_decode(parts[3])?;
+    let mut out = vec![0u8; expected.len()];
+    pbkdf2::pbkdf2_hmac::<Sha256>(password.as_bytes(), &salt, rounds, &mut out);
+    Ok(subtle_ct_eq(&out, &expected))
+}
+
+/// 常量时间字节比较（防时序侧信道；长度不等直接 false 不泄长）
+fn subtle_ct_eq(a: &[u8], b: &[u8]) -> bool {
+    if a.len() != b.len() {
+        return false;
+    }
+    let mut diff = 0u8;
+    for (x, y) in a.iter().zip(b.iter()) {
+        diff |= x ^ y;
+    }
+    diff == 0
+}
+
+/// 识别哈希算法（前缀识别；无法识别返回 None）
+pub fn detect_hash_algorithm(hash: &str) -> Option<&'static str> {
+    let h = hash.trim();
+    if h.starts_with("$argon2id$") {
+        Some("Argon2id")
+    } else if h.starts_with("$argon2i$") {
+        Some("Argon2i")
+    } else if h.starts_with("$argon2d$") {
+        Some("Argon2d")
+    } else if h.starts_with("$2a$") || h.starts_with("$2b$") || h.starts_with("$2y$") {
+        Some("Bcrypt")
+    } else if h.starts_with("$pbkdf2-sha256$") {
+        Some("PBKDF2-SHA256")
+    } else if h.starts_with("$pbkdf2$") {
+        Some("PBKDF2")
+    } else if h.starts_with("{SSHA}") || h.starts_with("{SSHA256}") || h.starts_with("{PBKDF2}") {
+        Some("PBKDF2 (LDAP)")
+    } else if h.len() == 32 && h.chars().all(|c| c.is_ascii_hexdigit()) {
+        Some("MD5")
+    } else if h.len() == 40 && h.chars().all(|c| c.is_ascii_hexdigit()) {
+        Some("SHA1")
+    } else if h.len() == 64 && h.chars().all(|c| c.is_ascii_hexdigit()) {
+        Some("SHA256")
+    } else {
+        None
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -288,5 +422,63 @@ mod tests {
             hash_password("abc", HashAlgorithm::Md5).unwrap(),
             "900150983cd24fb0d6963f7d28e17f72"
         );
+    }
+
+    #[test]
+    fn verify_roundtrip_all_formats() {
+        let pwd = "S3cret!pass";
+        for algo in [
+            HashAlgorithm::Argon2id,
+            HashAlgorithm::Bcrypt,
+            HashAlgorithm::Pbkdf2,
+        ] {
+            let h = hash_password(pwd, algo).unwrap();
+            assert!(
+                verify_password(pwd, &h).unwrap(),
+                "{} 正例应通过",
+                algo.label()
+            );
+            assert!(
+                !verify_password("wrong", &h).unwrap(),
+                "{} 反例应拒绝",
+                algo.label()
+            );
+        }
+        // MD5
+        let h = hash_password("abc", HashAlgorithm::Md5).unwrap();
+        assert!(verify_password("abc", &h).unwrap());
+        assert!(!verify_password("abd", &h).unwrap());
+    }
+
+    #[test]
+    fn verify_argon2_params_parsing() {
+        // 参数解析路径：改小参数后哈希值必然不同 → 同密码校验应返回 Ok(false)
+        // （参数参与计算，篡改参数即校验失败），不应报错
+        let h = hash_password("x", HashAlgorithm::Argon2id).unwrap();
+        let modified = h.replace("m=19456,t=2,p=1", "m=8192,t=3,p=2");
+        assert_eq!(verify_password("x", &modified), Ok(false));
+        assert_eq!(verify_password("y", &modified), Ok(false));
+    }
+
+    #[test]
+    fn verify_rejects_unknown_format() {
+        assert!(verify_password("x", "$1$xyz$abc").is_err());
+        assert!(verify_password("x", "not-a-hash").is_err());
+        assert!(verify_password("x", "").is_err());
+    }
+
+    #[test]
+    fn detect_hash_algorithm_prefixes() {
+        assert_eq!(detect_hash_algorithm("$argon2id$v=19$.."), Some("Argon2id"));
+        assert_eq!(detect_hash_algorithm("$2b$12$.."), Some("Bcrypt"));
+        assert_eq!(
+            detect_hash_algorithm("$pbkdf2-sha256$600000$.."),
+            Some("PBKDF2-SHA256")
+        );
+        assert_eq!(
+            detect_hash_algorithm("900150983cd24fb0d6963f7d28e17f72"),
+            Some("MD5")
+        );
+        assert_eq!(detect_hash_algorithm("deadbeef"), None);
     }
 }

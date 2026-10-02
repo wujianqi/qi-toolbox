@@ -8,12 +8,14 @@
 //! 勾选标记仅在悬停/选中时浮现，列表平时完全干净，且无重建闪烁。
 
 use std::cell::Cell;
+use std::rc::Rc;
 use std::sync::mpsc;
 
 use windui::core::{EventCtx, Widget};
 use windui::event::{CursorShape, Event, MouseButton, PointerKind};
 use windui::geometry::Rect;
 use windui::prelude::*;
+use windui::render::image::VisualState;
 use windui::render::{Canvas, Paint};
 use windui::spec::Align;
 use windui::style::Style;
@@ -22,29 +24,36 @@ use windui::text::{TextEngine, TextStyle};
 use super::icons;
 use crate::core::sftp;
 
-/// 行图标素材：SVG 一次解析（彩色素材自带配色，不参与主题染色），
-/// 按扩展名/选中态挑选（目录/压缩包/图片/代码/配置/日志/通用文件，
-/// 选中行用 `_CHECKED` 变体）。`Image` 内部 Rc 共享，克隆廉价——整列表共享一份。
+/// 行图标素材：彩色 SVG 自带配色（不参与主题染色），按扩展名/选中态挑选
+/// （目录/压缩包/图片/配置/日志/通用文件，选中行用 `_CHECKED` 变体）。
+///
+/// 清晰度关键：不走 `Image::from_svg_bytes(.., Some(15))` 的**预光栅**——那会把
+/// 图标钉死在 15 物理像素，DPI 缩放 ≠ 100% 时经双线性重采样必然发糊。改为持有
+/// DPI 感知的 `ImageContent`（矢量源），每帧按槽位实际物理尺寸现场光栅化缓存。
+/// `Rc` 字段：ImageContent 非 Clone（内部 RefCell 缓存），Rc 共享可 Clone 且
+/// 整列表共享同一份光栅缓存。
 #[derive(Clone)]
 pub(super) struct RowArt {
-    folder: Image,
-    folder_checked: Image,
-    file: Image,
-    file_checked: Image,
-    archive: Image,
-    archive_checked: Image,
-    image: Image,
-    image_checked: Image,
-    config: Image,
-    config_checked: Image,
-    log: Image,
-    log_checked: Image,
+    folder: Rc<ImageContent>,
+    folder_checked: Rc<ImageContent>,
+    file: Rc<ImageContent>,
+    file_checked: Rc<ImageContent>,
+    archive: Rc<ImageContent>,
+    archive_checked: Rc<ImageContent>,
+    image: Rc<ImageContent>,
+    image_checked: Rc<ImageContent>,
+    config: Rc<ImageContent>,
+    config_checked: Rc<ImageContent>,
+    log: Rc<ImageContent>,
+    log_checked: Rc<ImageContent>,
 }
 
 impl RowArt {
     pub(super) fn new() -> Self {
-        let mk =
-            |bytes: &[u8]| Image::from_svg_bytes(bytes, Some(15)).expect("内置 SVG 必然可解析");
+        // from_svg_bytes(_, None) 失败时 paint 画占位框（正常不会走到），不 panic。
+        // Rc 共享：ImageContent 非 Clone（内部有光栅缓存 RefCell），整列表共享一份
+        // 光栅缓存——同一图标所有行只光栅化一次。
+        let mk = |bytes: &[u8]| Rc::new(ImageContent::from_svg_bytes(bytes, None));
         Self {
             folder: mk(icons::FOLDER),
             folder_checked: mk(icons::FOLDER_SELECTED),
@@ -63,12 +72,12 @@ impl RowArt {
 
     /// 按文件扩展名 + 选中态挑图标（目录除外）：压缩包 / 图片 / 配置 / 日志
     /// 用彩色素材（选中 = checked 变体），代码 / 其余回落到通用文件描边图标。
-    fn pick(&self, name: &str, is_dir: bool, selected: bool) -> &Image {
+    fn pick(&self, name: &str, is_dir: bool, selected: bool) -> Rc<ImageContent> {
         if is_dir {
             return if selected {
-                &self.folder_checked
+                Rc::clone(&self.folder_checked)
             } else {
-                &self.folder
+                Rc::clone(&self.folder)
             };
         }
         let ext = name
@@ -80,41 +89,41 @@ impl RowArt {
             // 压缩包
             "zip" | "tar" | "gz" | "tgz" | "bz2" | "xz" | "zst" | "7z" | "rar" => {
                 if selected {
-                    &self.archive_checked
+                    Rc::clone(&self.archive_checked)
                 } else {
-                    &self.archive
+                    Rc::clone(&self.archive)
                 }
             }
             // 图片
             "png" | "jpg" | "jpeg" | "gif" | "webp" | "svg" | "ico" | "bmp" => {
                 if selected {
-                    &self.image_checked
+                    Rc::clone(&self.image_checked)
                 } else {
-                    &self.image
+                    Rc::clone(&self.image)
                 }
             }
             // 配置
             "json" | "yaml" | "yml" | "toml" | "ini" | "conf" | "cfg" | "env" | "xml" => {
                 if selected {
-                    &self.config_checked
+                    Rc::clone(&self.config_checked)
                 } else {
-                    &self.config
+                    Rc::clone(&self.config)
                 }
             }
             // 日志
             "log" => {
                 if selected {
-                    &self.log_checked
+                    Rc::clone(&self.log_checked)
                 } else {
-                    &self.log
+                    Rc::clone(&self.log)
                 }
             }
             // 其余暂未设图标的类型一律视为通用文件
             _ => {
                 if selected {
-                    &self.file_checked
+                    Rc::clone(&self.file_checked)
                 } else {
-                    &self.file
+                    Rc::clone(&self.file)
                 }
             }
         }
@@ -140,6 +149,8 @@ const SLOT_X: f32 = 10.0;
 const CHECK_HIT: f32 = 30.0;
 /// 大小列宽（行右缘再内收 [`SIZE_RIGHT_PAD`]）。
 const SIZE_W: f32 = 90.0;
+/// 日期列宽（大小列左侧）。
+const DATE_W: f32 = 96.0;
 /// 大小列右缘内收量：避开水印在内容之上的滚动条。
 const SIZE_RIGHT_PAD: f32 = 12.0;
 
@@ -216,17 +227,16 @@ impl Widget for FileRow {
         let slot_x = x + SLOT_X;
         let slot_y = y + (h - CHECK_SIZE) / 2.0;
         let img = self.art.pick(&self.entry.name, self.entry.is_dir, sel);
-        canvas.draw_image(
-            img,
+        img.paint_into(
             Rect::new(
                 slot_x as i32,
                 slot_y as i32,
                 CHECK_SIZE as i32,
                 CHECK_SIZE as i32,
             ),
-            Fit::Contain,
-            0.0,
-            1.0,
+            canvas,
+            style,
+            VisualState::Normal,
         );
 
         // 文件名：超宽省略号截断（label 的 truncate 等效，逐字符回退 + "…"）
@@ -250,15 +260,30 @@ impl Widget for FileRow {
             &ts,
         );
 
-        // 大小列（目录无大小）：右缘内收 12px，避开水印在内容之上的滚动条
+        // 大小列（目录无大小）+ 日期列：右缘内收 12px，避开水印在内容之上的滚动条
+        let ts_small = TextStyle { size: 12.0, ..ts };
         if !self.entry.is_dir {
-            let ts_small = TextStyle { size: 12.0, ..ts };
             canvas.draw_text(
                 &sftp::human_size(self.entry.size),
                 Rect::new(
-                    (x + w - SIZE_W - SIZE_RIGHT_PAD) as i32,
+                    (x + w - SIZE_W - DATE_W - SIZE_RIGHT_PAD) as i32,
                     bounds.y,
                     SIZE_W as i32,
+                    bounds.h,
+                ),
+                p.text_muted,
+                Align::End,
+                &ts_small,
+            );
+        }
+        // 修改日期（服务器未返回时不显示；目录同样展示其 mtime）
+        if self.entry.mtime > 0 {
+            canvas.draw_text(
+                &crate::core::fmt::format_date(self.entry.mtime),
+                Rect::new(
+                    (x + w - DATE_W - SIZE_RIGHT_PAD) as i32,
+                    bounds.y,
+                    DATE_W as i32,
                     bounds.h,
                 ),
                 p.text_muted,

@@ -39,6 +39,12 @@ fn log_dir() -> PathBuf {
     crate::core::settings::config_dir().join("logs")
 }
 
+/// 日志目录路径（关于页「打开日志目录」入口用；尽力创建，路径仅供参考）
+pub fn dir() -> PathBuf {
+    let _ = std::fs::create_dir_all(log_dir());
+    log_dir()
+}
+
 fn log_file() -> PathBuf {
     log_dir().join("app.log")
 }
@@ -130,7 +136,12 @@ pub fn init() {
         write_line(
             Level::Error,
             "PANIC",
-            &format!("{} — {}\n{}", loc, payload, std::backtrace::Backtrace::force_capture()),
+            &format!(
+                "{} — {}\n{}",
+                loc,
+                payload,
+                std::backtrace::Backtrace::force_capture()
+            ),
         );
         default_hook(info);
     }));

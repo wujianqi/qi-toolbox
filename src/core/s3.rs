@@ -16,6 +16,8 @@ pub struct S3Entry {
     pub is_dir: bool,
     /// 字节数（目录为 0）
     pub size: u64,
+    /// 修改时间 Unix 秒（目录/未返回时为 0，UI 不显示）
+    pub mtime: i64,
 }
 
 /// S3 连接参数（来自 store::S3Site 解密后的明文视图）
@@ -54,6 +56,19 @@ fn credentials(c: &S3Cred) -> Credentials {
     Credentials::new(c.access_key.clone(), c.secret.clone())
 }
 
+/// 生成对象下载的预签名 GET URL（有效期 1 小时，过期自动失效）。
+/// 纯本地签名计算，不发网络请求；复制给他人/浏览器即可直接下载。
+pub fn presign_get(c: &S3Cred, key: &str) -> Result<String, String> {
+    if key.is_empty() {
+        return Err(crate::lang::S3_PRESIGN_NO_KEY().to_string());
+    }
+    let b = bucket(c)?;
+    let creds = credentials(c);
+    let action = b.get_object(Some(&creds), key);
+    let url = action.sign(std::time::Duration::from_secs(3600));
+    Ok(url.to_string())
+}
+
 /// 列出指定前缀下的对象与子前缀（一层；delimiter=/ 目录式浏览）。
 /// `prefix` 为空 = 根目录。返回按「目录在前、名称升序」排序的条目。
 pub fn list(c: &S3Cred, prefix: &str) -> Result<Vec<S3Entry>, String> {
@@ -89,6 +104,7 @@ fn parse_list_xml(xml: &str) -> Result<Vec<S3Entry>, String> {
                     name,
                     is_dir: true,
                     size: 0,
+                    mtime: 0,
                 });
             }
         }
@@ -99,6 +115,10 @@ fn parse_list_xml(xml: &str) -> Result<Vec<S3Entry>, String> {
         let size: u64 = slice(&seg, "<Size>", "</Size>")
             .and_then(|s| s.parse().ok())
             .unwrap_or(0);
+        // LastModified（ISO8601 UTC，如 2024-01-02T03:04:05.000Z）→ Unix 秒
+        let mtime = slice(&seg, "<LastModified>", "</LastModified>")
+            .and_then(parse_iso8601_secs)
+            .unwrap_or(0);
         if key.ends_with('/') && size == 0 {
             continue; // 目录标记对象不作为文件显示
         }
@@ -108,6 +128,7 @@ fn parse_list_xml(xml: &str) -> Result<Vec<S3Entry>, String> {
                 name,
                 is_dir: false,
                 size,
+                mtime,
             });
         }
     }
@@ -143,6 +164,27 @@ fn slice<'a>(xml: &'a str, open: &str, close: &str) -> Option<&'a str> {
     Some(&rest[..j])
 }
 
+/// ISO8601 UTC 时间（S3 LastModified，如 `2024-01-02T03:04:05.000Z`）→ Unix 秒。
+/// 手拉解析避免引入时间 crate；解析失败返回 None。
+fn parse_iso8601_secs(s: &str) -> Option<i64> {
+    let b = s.as_bytes();
+    if b.len() < 19 || b[4] != b'-' || b[7] != b'-' || (b[10] != b'T' && b[10] != b' ') {
+        return None;
+    }
+    let num = |r: std::ops::Range<usize>| s.get(r)?.parse::<i64>().ok();
+    let (y, mo, d) = (num(0..4)?, num(5..7)?, num(8..10)?);
+    let (h, mi, sec) = (num(11..13)?, num(14..16)?, num(17..19)?);
+    // 民用日期 → Unix 天数（Howard Hinnant days_from_civil）
+    let y = if mo <= 2 { y - 1 } else { y };
+    let era = y.div_euclid(400);
+    let yoe = y - era * 400;
+    let mp = (mo + 9) % 12;
+    let doy = (153 * mp + 2) / 5 + d - 1;
+    let doe = yoe * 365 + yoe / 4 - yoe / 100 + doy;
+    let days = era * 146_097 + doe - 719_468;
+    Some(days * 86_400 + h * 3600 + mi * 60 + sec)
+}
+
 /// 完整对象键（prefix + name；目录名补结尾斜杠）
 pub fn join_key(prefix: &str, name: &str, is_dir: bool) -> String {
     let base = prefix.trim_end_matches('/');
@@ -157,11 +199,13 @@ pub fn join_key(prefix: &str, name: &str, is_dir: bool) -> String {
     k
 }
 
-/// 上传本地文件（PUT；超过 64MB 自动 Multipart，5MB 分片）
+/// 上传本地文件（PUT；超过 64MB 自动 Multipart，5MB 分片）。
+/// Multipart 支持断点续传：进度记录在本地文件旁的 `.qtbpart` 状态文件，
+/// 失败后重传同一文件时从已完成的分片继续，成功后自动清除状态文件。
 pub fn upload(c: &S3Cred, key: &str, local: &std::path::Path) -> Result<(), String> {
     let data = std::fs::read(local).map_err(err)?;
     if data.len() > 64 * 1024 * 1024 {
-        upload_multipart(c, key, &data)
+        upload_multipart(c, key, &data, local)
     } else {
         let b = bucket(c)?;
         let creds = credentials(c);
@@ -179,28 +223,54 @@ pub fn upload(c: &S3Cred, key: &str, local: &std::path::Path) -> Result<(), Stri
     }
 }
 
-/// Multipart 上传：initiate → 逐片 PUT → complete
-fn upload_multipart(c: &S3Cred, key: &str, data: &[u8]) -> Result<(), String> {
+/// Multipart 上传：initiate → 逐片 PUT → complete。
+/// 断点续传：`state_path` 记录 upload_id 与已完成分片的 ETag，
+/// 重传同一文件时跳过已完成分片；complete 成功后删除状态文件。
+fn upload_multipart(
+    c: &S3Cred,
+    key: &str,
+    data: &[u8],
+    state_path: &std::path::Path,
+) -> Result<(), String> {
     let b = bucket(c)?;
     let creds = credentials(c);
 
-    // initiate
-    let create = b.create_multipart_upload(Some(&creds), key);
-    let url = create.sign(std::time::Duration::from_secs(600));
-    let resp = ureq::post(url.as_str())
-        .timeout(std::time::Duration::from_secs(60))
-        .call()
-        .map_err(|e| format!("multipart init: {}", e))?;
-    let body = resp.into_string().map_err(err)?;
-    let upload_id = slice(&body, "<UploadId>", "</UploadId>")
-        .ok_or_else(|| "multipart init: no UploadId".to_string())?
-        .to_string();
+    // 断点续传：读取上次残留的 upload_id 与已传分片 ETag（文件损坏则忽略）
+    let mut upload_id: Option<String> = None;
+    let mut done_etags: Vec<String> = Vec::new();
+    if let Ok(s) = std::fs::read_to_string(state_path) {
+        let mut lines = s.lines();
+        if let Some(id) = lines.next() {
+            if !id.trim().is_empty() {
+                upload_id = Some(id.trim().to_string());
+                done_etags = lines.map(|l| l.trim().to_string()).collect();
+            }
+        }
+    }
 
-    // 逐片上传（失败 abort）
-    let upload = match upload_parts(c, key, &upload_id, data) {
+    // 无残留进度则 initiate 新上传
+    if upload_id.is_none() {
+        let create = b.create_multipart_upload(Some(&creds), key);
+        let url = create.sign(std::time::Duration::from_secs(600));
+        let resp = ureq::post(url.as_str())
+            .timeout(std::time::Duration::from_secs(60))
+            .call()
+            .map_err(|e| format!("multipart init: {}", e))?;
+        let body = resp.into_string().map_err(err)?;
+        upload_id = Some(
+            slice(&body, "<UploadId>", "</UploadId>")
+                .ok_or_else(|| "multipart init: no UploadId".to_string())?
+                .to_string(),
+        );
+    }
+    let upload_id = upload_id.unwrap();
+
+    // 逐片上传（失败保留进度文件，下次续传）
+    let upload = match upload_parts(c, key, &upload_id, data, &done_etags, state_path) {
         Ok(parts) => parts,
         Err(e) => {
             let _ = abort_multipart(c, key, &upload_id);
+            let _ = std::fs::remove_file(state_path);
             return Err(e);
         }
     };
@@ -214,25 +284,39 @@ fn upload_multipart(c: &S3Cred, key: &str, data: &[u8]) -> Result<(), String> {
         .call()
         .map_err(|e| format!("multipart complete: {}", e))?;
     if resp.status() < 300 {
+        let _ = std::fs::remove_file(state_path);
         Ok(())
     } else {
+        let _ = abort_multipart(c, key, &upload_id);
+        let _ = std::fs::remove_file(state_path);
         Err(format!("multipart complete: HTTP {}", resp.status()))
     }
 }
 
-/// 逐片 PUT，返回各片 ETag
+/// 逐片 PUT，返回各片 ETag。
+/// `done` 为上次已成功分片的 ETag（按分片顺序），直接复用并跳过；
+/// 每新完成一片就把 ETag 追加写入 `state_path`（写崩最多重传当前片）。
 fn upload_parts(
     c: &S3Cred,
     key: &str,
     upload_id: &str,
     data: &[u8],
+    done: &[String],
+    state_path: &std::path::Path,
 ) -> Result<Vec<String>, String> {
     let b = bucket(c)?;
     let creds = credentials(c);
     const PART: usize = 5 * 1024 * 1024;
-    let mut etags = Vec::new();
-    let mut offset = 0usize;
-    let mut num = 1u16;
+    let mut etags: Vec<String> = done.to_vec();
+    let mut offset = etags.len() * PART;
+    let mut num = etags.len() as u16 + 1;
+    // 残留进度文件按行重写（保留已完成片），后续逐片追加
+    if !done.is_empty() {
+        let _ = std::fs::write(
+            state_path,
+            format!("{}\n{}", upload_id, done.join("\n")),
+        );
+    }
     while offset < data.len() {
         let end = (offset + PART).min(data.len());
         let chunk = &data[offset..end];
@@ -245,12 +329,24 @@ fn upload_parts(
         if resp.status() >= 300 {
             return Err(format!("part {}: HTTP {}", num, resp.status()));
         }
-        etags.push(
-            resp.header("ETag")
-                .unwrap_or_default()
-                .trim_matches('"')
-                .to_string(),
-        );
+        let etag = resp
+            .header("ETag")
+            .unwrap_or_default()
+            .trim_matches('"')
+            .to_string();
+        etags.push(etag.clone());
+        // 进度落盘：upload_id 首行 + 各片 ETag
+        let _ = std::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(state_path)
+            .and_then(|mut f| {
+                use std::io::Write;
+                if done.is_empty() && etags.len() == 1 {
+                    writeln!(f, "{}", upload_id)?;
+                }
+                writeln!(f, "{}", etag)
+            });
         offset = end;
         num += 1;
     }
@@ -267,22 +363,57 @@ fn abort_multipart(c: &S3Cred, key: &str, upload_id: &str) -> Result<(), String>
     Ok(())
 }
 
-/// 下载对象到本地目录（保持对象名；返回写入的完整路径）
+/// 下载对象到本地目录（保持对象名；返回写入的完整路径）。
+/// 支持断点续传：本地已有同名且小于远端大小的文件时，经 Range 从断点续写。
 pub fn download(c: &S3Cred, key: &str, local_dir: &str) -> Result<String, String> {
     let b = bucket(c)?;
     let creds = credentials(c);
     let action = b.get_object(Some(&creds), key);
     let url = action.sign(std::time::Duration::from_secs(600));
-    let resp = ureq::get(url.as_str())
-        .timeout(std::time::Duration::from_secs(600))
+    let name = key.rsplit('/').next().unwrap_or(key);
+    let dest = std::path::Path::new(local_dir).join(name);
+
+    // 先探测远端大小（HEAD），决定续传偏移
+    let head_url = b.head_object(Some(&creds), key).sign(std::time::Duration::from_secs(600));
+    let remote_len = match ureq::head(head_url.as_str())
+        .timeout(std::time::Duration::from_secs(60))
         .call()
-        .map_err(|e| format!("download: {}", e))?;
+    {
+        Ok(resp) if resp.status() < 300 => resp
+            .header("Content-Length")
+            .and_then(|v| v.parse::<u64>().ok())
+            .unwrap_or(0),
+        _ => 0, // HEAD 失败则退化为整体 GET
+    };
+
+    // 断点续传：本地已有部分文件（小于远端大小）则从其大小处续写
+    let resume_from = match std::fs::metadata(&dest) {
+        Ok(m) if remote_len > 0 && m.len() < remote_len => m.len(),
+        Ok(m) if remote_len > 0 && m.len() == remote_len => return Ok(dest.to_string_lossy().into_owned()),
+        _ => 0,
+    };
+
+    let mut req = ureq::get(url.as_str()).timeout(std::time::Duration::from_secs(600));
+    if resume_from > 0 {
+        req = req.set("Range", &format!("bytes={}-", resume_from));
+    }
+    let resp = req.call().map_err(|e| format!("download: {}", e))?;
     if resp.status() >= 300 {
         return Err(format!("download: HTTP {}", resp.status()));
     }
-    let name = key.rsplit('/').next().unwrap_or(key);
-    let dest = std::path::Path::new(local_dir).join(name);
-    let mut file = std::fs::File::create(&dest).map_err(err)?;
+    let mut file = if resume_from > 0 {
+        // 服务器支持 Range 则 206 追加续写；否则 200 整体重建
+        if resp.status() == 206 {
+            std::fs::OpenOptions::new()
+                .append(true)
+                .open(&dest)
+                .map_err(err)?
+        } else {
+            std::fs::File::create(&dest).map_err(err)?
+        }
+    } else {
+        std::fs::File::create(&dest).map_err(err)?
+    };
     let mut reader = resp.into_reader();
     std::io::copy(&mut reader, &mut file).map_err(err)?;
     Ok(dest.to_string_lossy().into_owned())

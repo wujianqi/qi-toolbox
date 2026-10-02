@@ -1,61 +1,28 @@
 //! SVG 图标字节常量 — Lucide 风格 24×24 线性图标（MIT 许可风格，手写精简路径）
 //!
-//! 单色黑描边，可用 `Image::tinted` 按主题色染色；配合 `on_state` 注册各状态
-//! 染色图，实现图标随按钮 平常/悬停/按下/禁用 状态变色。
+//! 单色黑描边，经 `ImageContent::from_svg_bytes(bytes, None)` 走 **DPI 感知矢量
+//! 路径**：保留 SVG 源，paint 期按实际物理尺寸现场光栅化——任何 DPI 缩放倍率下
+//! 都 1:1 落像素，不糊。此前预光栅写死像素宽再由后端重采样的做法，在 100%/125%
+//! 以外的缩放下必然发虚，已废弃。
 //!
-//! 注意：`ImageContent::tint` 会把颜色应用到**所有**状态层，无法区分状态，
-//! 因此状态着色一律用 `on_state(state, 染色图)`（见 [`stateful_icon`]）。
+//! 单色图标用 [`stateful_icon`] 挂到按钮（muted 灰、随主题刷新）；彩色素材
+//! （文件浏览器图标、LOGO）直接 `ImageContent::from_svg_bytes(.., None)`，不参与染色。
 
-use windui::render::image::{Image, VisualState};
 use windui::ui::ImageContent;
 
 /// 软件 Logo（`src/logo.svg` 编译期内嵌，作应用窗口图标 / 关于页品牌图）。
 /// Logo 自带品牌色（非单色线性图），不参与主题染色。
 pub const LOGO: &[u8] = include_bytes!("../logo.svg");
 
-/// 一次性解析 + 按主题色染好的图标四态（普通/悬停/按下/禁用）。
-/// `Image` 为 Rc 共享，克隆廉价 —— 供高频行内图标（如表格行按钮）在闭包外
-/// 构造一次、每次 `content()` 复用，避免滚动重建时反复解析 SVG 与染色。
-#[derive(Clone)]
-pub struct StatefulIcon {
-    normal: Image,
-    hover: Image,
-    pressed: Image,
-    disabled: Image,
-}
-
-impl StatefulIcon {
-    /// 解析 SVG 并按当前主题色染色四态；解析失败返回 None（绘制时画占位框）。
-    ///
-    /// 输入法工具栏风格：平常=灰（`text_muted`），悬停/按下=主题蓝（`accent`），
-    /// 禁用=更浅的灰（`text_disabled`）。
-    pub fn from_svg(bytes: &[u8], target_width: Option<u32>) -> Option<Self> {
-        let raw = Image::from_svg_bytes(bytes, target_width).ok()?;
-        let th = windui::theme::current();
-        let p = &th.palette;
-        Some(Self {
-            normal: raw.tinted(p.text_muted),
-            hover: raw.tinted(p.accent_hover),
-            pressed: raw.tinted(p.accent_active),
-            disabled: raw.tinted(p.text_disabled),
-        })
-    }
-
-    /// 组装为带状态层的 `ImageContent`（各状态层已染色，不设 tint）。
-    pub fn content(&self) -> ImageContent {
-        ImageContent::new(Some(self.normal.clone()))
-            .on_state(VisualState::Hover, self.hover.clone())
-            .on_state(VisualState::Pressed, self.pressed.clone())
-            .on_state(VisualState::Disabled, self.disabled.clone())
-    }
-}
-
-/// 带状态着色的按钮图标：平常=主题文字色，悬停=主题强调色，按下=强调激活色，
-/// 禁用=禁用文字色。用 `Element::icon_content(...)` 挂到按钮上替换静态 `icon_svg`。
-pub fn stateful_icon(bytes: &[u8], target_width: Option<u32>) -> ImageContent {
-    StatefulIcon::from_svg(bytes, target_width)
-        .map(|s| s.content())
-        .unwrap_or_else(|| ImageContent::new(None))
+/// 单色按钮图标：muted 灰，随主题刷新。用 `Element::icon_content(...)` 挂到按钮。
+///
+/// 走 DPI 感知矢量路径：paint 期按图标框实际物理尺寸现场光栅化并缓存，
+/// 任意 DPI 下 1:1 清晰。悬停/按下不再另换强调色——`on_state` 只收位图、
+/// 会绕开矢量路径重回发糊老路；悬停反馈由按钮背景色承担，禁用态由
+/// `VisualState` 的不透明度调制处理。
+pub fn stateful_icon(bytes: &[u8]) -> ImageContent {
+    // 单色黑描边源图，paint 期按主题 tint；解析失败 paint 时画占位框。
+    ImageContent::from_svg_bytes(bytes, None).tint(windui::theme::current().palette.text_muted)
 }
 
 /// 关于（圆圈 + i）
@@ -64,17 +31,26 @@ pub const INFO: &[u8] = br##"<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 
 /// 骰子（随机生成密码）
 pub const DICE: &[u8] = br##"<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="#000000" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="3" width="18" height="18" rx="2"/><circle cx="8.5" cy="8.5" r="1"/><circle cx="15.5" cy="8.5" r="1"/><circle cx="8.5" cy="15.5" r="1"/><circle cx="15.5" cy="15.5" r="1"/></svg>"##;
 
-/// 锁（加密）
-pub const LOCK: &[u8] = br##"<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="#000000" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="11" width="18" height="11" rx="2"/><path d="M7 11V7a5 5 0 0 1 10 0v4"/></svg>"##;
+/// 方框钥匙（随机密码，仿 Lucide key-square）
+pub const LOCK: &[u8] = br##"<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="#000000" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12.4 2.7a2.5 2.5 0 0 1 3.4 0l5.5 5.5a2.5 2.5 0 0 1 0 3.4l-3.7 3.7a2.5 2.5 0 0 1-3.4 0L8.7 9.8a2.5 2.5 0 0 1 0-3.4z"/><path d="m14 7 3 3"/><path d="m9.4 10.6-6.814 6.814A2 2 0 0 0 2 18.828V21a1 1 0 0 0 1 1h3a1 1 0 0 0 1-1v-1a1 1 0 0 1 1-1h1a1 1 0 0 0 1-1v-1a1 1 0 0 1 1-1h.172a2 2 0 0 0 1.414-.586l.814-.814"/></svg>"##;
+
+/// 备忘便签（仿 Lucide sticky-note，运维备忘导航图标）
+pub const NOTE: &[u8] = br##"<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="#000000" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M16 3H5a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h11l5-5V5a2 2 0 0 0-2-2z"/><path d="M15 3v4a2 2 0 0 0 2 2h4"/></svg>"##;
 
 /// 钥匙（生成密钥）
 pub const KEY: &[u8] = br##"<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="#000000" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 2l-2 2m-7.61 7.61a5.5 5.5 0 1 1-7.778 7.778 5.5 5.5 0 0 1 7.777-7.777zm0 0L15.5 7.5m0 0l3 3L22 7l-3-3m-3.5 3.5L19 4"/></svg>"##;
 
-/// 闪电（生成验证码）
-pub const ZAP: &[u8] = br##"<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="#000000" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polygon points="13 2 3 14 12 14 11 22 21 10 12 10"/></svg>"##;
+/// 验证码（方框省略号，仿 Lucide rectangle-ellipsis）
+pub const ZAP: &[u8] = br##"<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="#000000" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect width="20" height="12" x="2" y="6" rx="2"/><path d="M12 12h.01"/><path d="M17 12h.01"/><path d="M7 12h.01"/></svg>"##;
 
 /// 软盘（保存）
 pub const SAVE: &[u8] = br##"<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="#000000" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M19 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h11l5 5v11a2 2 0 0 1-2 2z"/><polyline points="17 21 17 13 7 13 7 21"/><polyline points="7 3 7 8 15 8"/></svg>"##;
+
+/// 导出结构（方框 + 右下箭头，仿 Lucide square-arrow-down-right）
+pub const EXPORT: &[u8] = br##"<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="#000000" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M15 15 9 9"/><path d="M9 15h6V9"/><rect x="3" y="3" width="18" height="18" rx="2"/></svg>"##;
+
+/// 用户（人形头像）
+pub const USER: &[u8] = br##"<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="#000000" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M20 21v-2a4 4 0 0 0-4-4H8a4 4 0 0 0-4 4v2"/><circle cx="12" cy="7" r="4"/></svg>"##;
 
 /// 二维码
 pub const QR: &[u8] = br##"<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="#000000" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="3" width="7" height="7" rx="1"/><rect x="14" y="3" width="7" height="7" rx="1"/><rect x="3" y="14" width="7" height="7" rx="1"/><path d="M14 14h3v3h-3z"/><path d="M21 14v3h-3"/></svg>"##;
@@ -135,10 +111,10 @@ pub const FOLDER: &[u8] = br##"<svg xmlns="http://www.w3.org/2000/svg" viewBox="
 pub const FOLDER_SELECTED: &[u8] = br##"<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path fill="#FFB300" d="M2 7a2 2 0 0 1 2-2h5l2 2h9a2 2 0 0 1 2 2v10a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V7z"/><path fill="#FFCA28" d="M2 9h20v8a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V9z"/><circle cx="18.5" cy="18.5" r="4.8" fill="#66BB6A"/><path d="M16 18.6l1.9 1.9 3.5-3.7" fill="none" stroke="#fff" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"/></svg>"##;
 
 /// 图像文件
-pub const IMAGE_FILE: &[u8] = br##"<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path fill="#E4E8EC" d="M14 3H6a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V9L14 3z"/><path fill="#8E7BA8" d="M14 3v6h6L14 3z"/><circle cx="9" cy="14" r="1.2" fill="#8E7BA8"/><path d="M5.5 19.5l3.5-4 2.5 2.5 3.5-4.5 3.5 6z" fill="#8E7BA8"/></svg>"##;
+pub const IMAGE_FILE: &[u8] = br##"<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path fill="#E4E8EC" d="M14 3H6a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V9L14 3z"/><path fill="#8E7BA8" d="M14 3v6h6L14 3z"/><circle cx="9" cy="14" r="1.2" fill="#8E7BA8"/><path d="M5.5 19.5l3.5-4 2.5 2.5 3.5 6z" fill="#8E7BA8"/></svg>"##;
 
 /// 图像文件选中
-pub const IMAGE_FILE_SELECTED: &[u8] = br##"<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path fill="#E4E8EC" d="M14 3H6a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V9L14 3z"/><path fill="#8E7BA8" d="M14 3v6h6L14 3z"/><circle cx="9" cy="14" r="1.2" fill="#8E7BA8"/><path d="M5.5 19.5l3.5-4 2.5 2.5 3.5-4.5 3.5 6z" fill="#8E7BA8"/><circle cx="18.5" cy="18.5" r="4.8" fill="#66BB6A"/><path d="M16 18.6l1.9 1.9 3.5-3.7" fill="none" stroke="#fff" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"/></svg>"##;
+pub const IMAGE_FILE_SELECTED: &[u8] = br##"<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path fill="#E4E8EC" d="M14 3H6a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V9L14 3z"/><path fill="#8E7BA8" d="M14 3v6h6L14 3z"/><circle cx="9" cy="14" r="1.2" fill="#8E7BA8"/><path d="M5.5 19.5l3.5-4 2.5 2.5 3.5 6z" fill="#8E7BA8"/><circle cx="18.5" cy="18.5" r="4.8" fill="#66BB6A"/><path d="M16 18.6l1.9 1.9 3.5-3.7" fill="none" stroke="#fff" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"/></svg>"##;
 
 /// 配置文件
 pub const CONFIG_FILE: &[u8] = br##"<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path fill="#E4E8EC" d="M14 3H6a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V9L14 3z"/><path fill="#6B9BA0" d="M14 3v6h6L14 3z"/><rect x="6.5" y="12.5" width="11" height="1.2" rx="0.6" fill="#6B9BA0"/><rect x="6.5" y="15.5" width="11" height="1.2" rx="0.6" fill="#6B9BA0"/><rect x="6.5" y="18.5" width="11" height="1.2" rx="0.6" fill="#6B9BA0"/><circle cx="10" cy="13.1" r="1.6" fill="#E4E8EC"/><circle cx="14" cy="16.1" r="1.6" fill="#E4E8EC"/><circle cx="9" cy="19.1" r="1.6" fill="#E4E8EC"/></svg>"##;
@@ -168,6 +144,7 @@ pub const ARCHIVE_FILE_SELECTED: &[u8] = br##"<svg xmlns="http://www.w3.org/2000
 pub const UPLOAD: &[u8] = br##"<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="#000000" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="17 8 12 3 7 8"/><line x1="12" y1="3" x2="12" y2="15"/></svg>"##;
 
 /// 下载（向下箭头入托盘）
+pub const LINK: &[u8] = br##"<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="#000000" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M10 13a5 5 0 0 0 7.54.54l3-3a5 5 0 0 0-7.07-7.07l-1.72 1.71"/><path d="M14 11a5 5 0 0 0-7.54-.54l-3 3a5 5 0 0 0 7.07 7.07l1.71-1.71"/></svg>"##;
 pub const DOWNLOAD: &[u8] = br##"<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="#000000" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/></svg>"##;
 
 /// 地球（远程检测菜单）

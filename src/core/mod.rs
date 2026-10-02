@@ -15,6 +15,7 @@
 //! - [`db`]：数据库后台任务编排（消息协议 + 结果快照 + spawn 线程）
 
 pub mod db;
+pub mod error;
 pub mod fmt;
 pub mod log;
 pub mod master;

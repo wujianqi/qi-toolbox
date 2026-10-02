@@ -21,8 +21,8 @@ pub struct PasswordUi {
     pub used_for: Signal<String>,
     /// 已保存的密码列表（store.db saved_passwords 表，密码已解密）
     pub saved: Signal<Vec<crate::core::store::SavedPassword>>,
-    /// 就地提示（保存成功/失败等）
-    pub msg: Signal<String>,
+    /// 校验哈希：待验证的哈希串输入
+    pub verify_hash: Signal<String>,
 }
 
 impl PasswordUi {
@@ -35,7 +35,7 @@ impl PasswordUi {
             algo: signal(0usize),
             used_for: signal(String::new()),
             saved: signal(crate::core::store::saved_pwd_list().unwrap_or_default()),
-            msg: signal(String::new()),
+            verify_hash: signal(String::new()),
         }
     }
 }
@@ -55,7 +55,7 @@ pub fn build_password_tab(ui: &PasswordUi) -> Element {
         algo,
         used_for,
         saved,
-        msg,
+        ..
     } = ui.clone();
 
     // 记忆本次密码页输入与选择（尽力而为：输入明文属敏感项，加密落盘）
@@ -86,7 +86,7 @@ pub fn build_password_tab(ui: &PasswordUi) -> Element {
             _ => lang::PWD_GEN_16(),
         })
         .neutral()
-        .icon_content(icons::stateful_icon(icons::DICE, Some(16)))
+        .icon_content(icons::stateful_icon(icons::DICE))
         .on_click(move |_| {
             if let Ok(pw) = password::generate_random_password(len) {
                 input.set(pw);
@@ -99,7 +99,7 @@ pub fn build_password_tab(ui: &PasswordUi) -> Element {
 
     let encrypt = Element::button(lang::PWD_ENCRYPT())
         .neutral()
-        .icon_content(icons::stateful_icon(icons::LOCK, Some(16)))
+        .icon_content(icons::stateful_icon(icons::LOCK))
         .on_click(move |_| {
             // 记忆本次输入与选择（明文属敏感项，加密落盘）
             remember_pwd(input, platform, algo);
@@ -137,41 +137,59 @@ pub fn build_password_tab(ui: &PasswordUi) -> Element {
             }
         });
 
+    // ── 校验哈希：输入哈希串，用当前输入框密码验证匹配 + 识别算法 ──
+    let (v_input, v_hash) = (input, ui.verify_hash);
+    let verify_btn = Element::button(lang::PWD_VERIFY())
+        .neutral()
+        .icon_content(icons::stateful_icon(icons::SHIELD))
+        .on_click(move |_| {
+            let pwd = v_input.get();
+            let hash = v_hash.get().trim().to_string();
+            if hash.is_empty() {
+                return;
+            }
+            // 算法识别结果一并展示（无法识别时 verify 也会报错）
+            let algo = password::detect_hash_algorithm(&hash)
+                .map(|s| s.to_string())
+                .unwrap_or_else(lang::PWD_HASH_UNKNOWN_ALGO);
+            match password::verify_password(&pwd, &hash) {
+                Ok(true) => super::toast::ok(lang::PWD_VERIFY_OK(algo.clone())),
+                Ok(false) => super::toast::err(lang::PWD_VERIFY_FAIL(algo)),
+                Err(e) => super::toast::err(e),
+            }
+        });
+
     // ── 算法下拉：与目标平台联动 ──
     // 平台变化时算法自动跟随该平台默认算法（在下拉 on_click 回调里同步——
     // 构建期禁止写信号，windui 会 panic；此前用 host_signal 在重建时 set，
     // 切主题整树重建即崩溃）；非「自定义」时算法下拉禁用（算法由平台决定）。
-    let algo_row = Element::row()
-        .spacing(8)
-        .cross(Align::Center)
-        .child(Element::label(lang::PWD_ALGO()).font_size(13.0))
-        .child(
-            Element::dropdown(algo_labels.clone(), algo)
-                .width(220)
-                .enabled_when(move || platform.get() == 0),
-        );
+    let algo_dropdown = Element::dropdown(algo_labels.clone(), algo)
+        .width(220)
+        .enabled_when(move || platform.get() == 0);
 
     // ── 保存密码：「用于：」备注 + 保存按钮；成功后刷新列表并就地提示 ──
     let save_btn = Element::button(lang::PWD_SAVE())
         .neutral()
-        .icon_content(icons::stateful_icon(icons::SAVE, Some(16)))
+        .icon_content(icons::stateful_icon(icons::SAVE))
         .on_click(move |_| {
-            let text = input.get().trim().to_string();
-            if text.is_empty() {
+            let hash = output.get().trim().to_string();
+            // 联动：保存的是「输出结果」里加密后的密码，尚无输出时提示先加密
+            if hash.is_empty() {
+                super::toast::err(lang::PWD_SAVE_NEED_ENCRYPT());
                 return;
             }
-            match crate::core::store::saved_pwd_add(used_for.get().trim(), &text) {
+            match crate::core::store::saved_pwd_add(used_for.get().trim(), &hash) {
                 Ok(()) => {
                     saved.set(crate::core::store::saved_pwd_list().unwrap_or_default());
                     let note = used_for.get().trim().to_string();
-                    msg.set(lang::PWD_SAVED_DONE(if note.is_empty() {
-                        text
+                    super::toast::ok(lang::PWD_SAVED_DONE(if note.is_empty() {
+                        hash
                     } else {
                         note
                     }));
                     used_for.set(String::new());
                 }
-                Err(e) => msg.set(lang::PWD_SAVED_FAIL(e)),
+                Err(e) => super::toast::err(lang::PWD_SAVED_FAIL(e)),
             }
         });
 
@@ -180,8 +198,7 @@ pub fn build_password_tab(ui: &PasswordUi) -> Element {
         saved,
         |e: &crate::core::store::SavedPassword| e.id,
         move |e: crate::core::store::SavedPassword| {
-            let msg = msg.clone();
-            let saved = saved.clone();
+            let saved = saved;
             let id = e.id;
             let copy_pwd = e.password.clone();
             Element::row()
@@ -212,7 +229,7 @@ pub fn build_password_tab(ui: &PasswordUi) -> Element {
                         .neutral()
                         .on_click(move |ctx| {
                             ctx.clipboard_set(&copy_pwd);
-                            msg.set(lang::PWD_COPIED());
+                            super::toast::ok(lang::PWD_COPIED());
                         }),
                 )
                 .child(
@@ -223,7 +240,6 @@ pub fn build_password_tab(ui: &PasswordUi) -> Element {
                         .on_click(move |_| {
                             if crate::core::store::saved_pwd_del(id).is_ok() {
                                 saved.set(crate::core::store::saved_pwd_list().unwrap_or_default());
-                                msg.set(String::new());
                             }
                         }),
                 )
@@ -238,6 +254,7 @@ pub fn build_password_tab(ui: &PasswordUi) -> Element {
             Element::col()
                 .spacing(10)
                 .child(
+                    // 平台与算法同一行：平台为预设时算法下拉禁用并自动跟随默认算法
                     Element::row()
                         .spacing(8)
                         .cross(Align::Center)
@@ -259,9 +276,10 @@ pub fn build_password_tab(ui: &PasswordUi) -> Element {
                                         }
                                     }
                                 }),
-                        ),
+                        )
+                        .child(Element::label(lang::PWD_ALGO()).font_size(13.0))
+                        .child(algo_dropdown),
                 )
-                .child(algo_row)
                 .child(
                     Element::row()
                         .spacing(8)
@@ -279,12 +297,58 @@ pub fn build_password_tab(ui: &PasswordUi) -> Element {
                                 .weight(1.0),
                         )
                         .child(encrypt),
+                )
+                // 校验哈希行：粘贴哈希串 → 用上方密码验证匹配 + 显示算法识别结果
+                .child(
+                    Element::row()
+                        .spacing(8)
+                        .child(
+                            Element::text_input(ui.verify_hash, lang::PWD_VERIFY_HASH_HINT())
+                                .width_match()
+                                .weight(1.0),
+                        )
+                        .child(verify_btn),
                 ),
         ))
+        // 输出与保存联动：保存密码保存的是上方「加密的密码」输出结果
         .child(card(
-            &lang::PWD_CARD_SAVE(),
+            &lang::PWD_CARD_OUTPUT(),
             Element::col()
                 .spacing(10)
+                .child(
+                    Element::row()
+                        .width_match()
+                        .spacing(16)
+                        .child(
+                            Element::col()
+                                .weight(1.0)
+                                .spacing(6)
+                                .child(Element::label(lang::PWD_OUTPUT_LABEL()).font_size(14.0))
+                                // 只读可选文本：输出可拖选/Ctrl+C 复制（不再借输入框承载）
+                                .child(
+                                    select_text(output)
+                                        .font_family("Consolas")
+                                        .font_size(13.0)
+                                        .width_match()
+                                        .height(120),
+                                ),
+                        )
+                        .child(
+                            Element::col()
+                                .weight(1.0)
+                                .spacing(6)
+                                .child(Element::label(lang::PWD_SQL_LABEL()).font_size(14.0))
+                                // 只读可选文本：SQL 可拖选/Ctrl+C 复制（不再借输入框承载）
+                                .child(
+                                    select_text(sql_out)
+                                        .font_family("Consolas")
+                                        .font_size(13.0)
+                                        .width_match()
+                                        .height(120),
+                                ),
+                        ),
+                )
+                // 保存行：保存对象即上方加密输出；「用于：」为备注
                 .child(
                     Element::row()
                         .spacing(8)
@@ -292,52 +356,11 @@ pub fn build_password_tab(ui: &PasswordUi) -> Element {
                         .child(Element::label(lang::PWD_USED_FOR()).font_size(13.0))
                         .child(
                             Element::text_input(used_for, lang::PWD_USED_FOR_HINT())
-                                .width_match()
-                                .weight(1.0),
+                                .width(220),
                         )
                         .child(save_btn),
                 )
                 .child(Element::label(lang::PWD_SAVED_LABEL()).font_size(14.0))
-                .child(saved_rows)
-                // 就地提示：保存成功/失败、复制成功
-                .child(
-                    Element::label_signal(msg)
-                        .font_size(11.0)
-                        .fg_role(Role::TextMuted),
-                ),
-        ))
-        .child(card(
-            &lang::PWD_CARD_OUTPUT(),
-            Element::row()
-                .width_match()
-                .spacing(16)
-                .child(
-                    Element::col()
-                        .weight(1.0)
-                        .spacing(6)
-                        .child(Element::label(lang::PWD_OUTPUT_LABEL()).font_size(14.0))
-                        // 只读可选文本：输出可拖选/Ctrl+C 复制（不再借输入框承载）
-                        .child(
-                            select_text(output)
-                                .font_family("Consolas")
-                                .font_size(13.0)
-                                .width_match()
-                                .height(120),
-                        ),
-                )
-                .child(
-                    Element::col()
-                        .weight(1.0)
-                        .spacing(6)
-                        .child(Element::label(lang::PWD_SQL_LABEL()).font_size(14.0))
-                        // 只读可选文本：SQL 可拖选/Ctrl+C 复制（不再借输入框承载）
-                        .child(
-                            select_text(sql_out)
-                                .font_family("Consolas")
-                                .font_size(13.0)
-                                .width_match()
-                                .height(120),
-                        ),
-                ),
+                .child(saved_rows),
         ))
 }

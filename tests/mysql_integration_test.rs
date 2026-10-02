@@ -11,11 +11,18 @@ use qi_toolbox::core::mysql::{MySqlSource, MySqlViewer, TableRef, PAGE_SIZE};
 
 fn main() {
     lang::install();
-    let src = MySqlSource {
-        host: "127.0.0.1".into(),
-        port: "3306".into(),
-        user: "root".into(),
-        pass: String::new(),
+    // 连接参数优先取 QI_MYSQL_URL（CI 传入），默认为本机开发实例
+    let src = match std::env::var("QI_MYSQL_URL")
+        .ok()
+        .and_then(|u| parse_mysql_url(&u))
+    {
+        Some(s) => s,
+        None => MySqlSource {
+            host: "127.0.0.1".into(),
+            port: "3306".into(),
+            user: "root".into(),
+            pass: String::new(),
+        },
     };
 
     // ── 1. 直连冒烟：服务可达、凭据正确 ──
@@ -249,4 +256,24 @@ fn urlencoding_pass(pass: &str) -> String {
             }
         })
         .collect()
+}
+
+/// 解析 mysql://user:pass@host:port/db 形式的连接串（QI_MYSQL_URL 用）
+fn parse_mysql_url(url: &str) -> Option<MySqlSource> {
+    let rest = url.strip_prefix("mysql://")?;
+    let (authority, _db) = rest.split_once('/').unwrap_or((rest, ""));
+    // 密码可能含 '@'：按最后一个 '@' 定位
+    let at = authority.rfind('@')?;
+    let (userinfo, hostport) = authority.split_at(at);
+    let (user, pass) = userinfo.split_once(':').unwrap_or((userinfo, ""));
+    let (host, port) = hostport
+        .strip_prefix('@')?
+        .split_once(':')
+        .unwrap_or((hostport.strip_prefix('@')?, "3306"));
+    Some(MySqlSource {
+        host: host.into(),
+        port: port.into(),
+        user: user.into(),
+        pass: pass.into(),
+    })
 }

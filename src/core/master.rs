@@ -268,3 +268,41 @@ pub fn unprotect(cipher: &[u8]) -> Result<Vec<u8>, String> {
     let key = current_key()?;
     open(&key, s)
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// derive_key 同口令同盐结果一致，不同盐结果不同
+    #[test]
+    fn derive_key_deterministic_and_salt_sensitive() {
+        let k1 = derive_key("pass-abc", b"salt-salt-salt-16").unwrap();
+        let k2 = derive_key("pass-abc", b"salt-salt-salt-16").unwrap();
+        let k3 = derive_key("pass-abc", b"other-other-16x").unwrap();
+        assert_eq!(k1, k2);
+        assert_ne!(k1, k3);
+        assert_eq!(k1.len(), 32);
+    }
+
+    /// seal/open 回路；密文带 v2: 前缀；随机 nonce 使同明文密文不同
+    #[test]
+    fn seal_open_roundtrip() {
+        let key = [7u8; 32];
+        let enc = seal(&key, "hello 奇兔宝".as_bytes()).unwrap();
+        assert!(is_v2(&enc));
+        assert_eq!(open(&key, &enc).unwrap(), "hello 奇兔宝".as_bytes());
+        let enc2 = seal(&key, "hello 奇兔宝".as_bytes()).unwrap();
+        assert_ne!(enc, enc2, "随机 nonce 应产生不同密文");
+    }
+
+    /// 错误密钥 / 损坏密文 / 非 v2 前缀应报错而非 panic
+    #[test]
+    fn open_rejects_wrong_key_and_garbage() {
+        let enc = seal(&[1u8; 32], b"secret").unwrap();
+        let wrong = open(&[2u8; 32], &enc);
+        assert!(wrong.is_err());
+        assert!(open(&[1u8; 32], "v2:!!!not-base64!!!").is_err());
+        assert!(open(&[1u8; 32], "v2:AAAA").is_err(), "过短密文应报错");
+        assert!(!is_v2("plain-text"));
+    }
+}

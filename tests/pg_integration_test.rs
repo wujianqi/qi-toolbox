@@ -9,7 +9,9 @@ use tokio_postgres::NoTls;
 
 fn main() {
     lang::install();
-    let url = "postgres://sa:q@127.0.0.1:5432/postgres";
+    // 连接串优先取 QI_PG_URL（CI 传入），默认为本机开发实例
+    let url = std::env::var("QI_PG_URL")
+        .unwrap_or_else(|_| "postgres://sa:q@127.0.0.1:5432/postgres".into());
     // ── 1. 直连冒烟：服务可达、凭据正确 ──
     // 连接与查询须在同一 runtime 内完成（conn 是连接驱动任务，drop 即断连挂死查询）
     let url_owned = url.to_string();
@@ -83,7 +85,7 @@ fn main() {
     // ── 3. 走 core::pg 全流程（在独立线程 + 块内 runtime，模拟 UI 调用方式）──
     let url_owned = url.to_string();
     let handle = std::thread::spawn(move || {
-        let rt = tokio::runtime::Builder::new_current_thread()
+        let _rt = tokio::runtime::Builder::new_current_thread()
             .enable_all()
             .build()
             .unwrap();

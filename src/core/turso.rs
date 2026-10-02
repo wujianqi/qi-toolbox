@@ -261,7 +261,7 @@ impl TursoViewer {
     /// 连接数据库并加载表列表（不自动加载任何表数据，点击表名时再异步加载）
     pub fn connect(&mut self) -> Result<(), String> {
         let source = self.source.clone();
-        let (tables, _, _, _, _, err) = run_query(&source, |conn| {
+        let ret = run_query(&source, |conn| {
             Box::pin(async move {
                 // 只加载表列表，立即返回
                 let mut rows = conn
@@ -281,7 +281,11 @@ impl TursoViewer {
                 }
                 Ok((tables, None, Vec::new(), Vec::new(), 0, None))
             })
-        })?;
+        });
+        if let Err(ref e) = ret {
+            crate::core::log::warn("turso", &format!("connect failed: {}", e));
+        }
+        let (tables, _, _, _, _, err) = ret?;
 
         self.tables = tables;
         self.selected_table = None;
@@ -663,5 +667,66 @@ impl TursoViewer {
         let last_rowid = rowid_slot.as_deref().and_then(|s| s.parse::<i64>().ok());
         let reached_end = data.is_empty();
         Ok((data, if reached_end { None } else { last_rowid }))
+    }
+
+    /// 读取建表 DDL（sqlite_master 原文，含索引/触发器/视图；视图与触发器仅在整库导出时出现）
+    pub fn export_ddl(&mut self, table_name: Option<&str>) -> Result<Vec<String>, String> {
+        let source = self.source.clone();
+        // 系统对象（sqlite_ 开头）与自动索引不导出；sql 为 NULL 的是内部自动对象
+        let filter = match table_name {
+            Some(t) => format!("AND name = '{}'", t.replace('\'', "''")),
+            None => String::new(),
+        };
+        let (_, _, _, data, _, err) = run_query(&source, move |conn| {
+            Box::pin(async move {
+                let mut rows = conn
+                    .query(
+                        &format!(
+                            "SELECT sql FROM sqlite_master \
+                             WHERE sql IS NOT NULL \
+                               AND name NOT LIKE 'sqlite_%' \
+                               AND name NOT LIKE 'sqlite_autoindex_%' {}",
+                            filter
+                        ),
+                        Vec::<turso::Value>::new(),
+                    )
+                    .await
+                    .map_err(|e| lang::ERR_TABLE_INFO(e.to_string()))?;
+                let mut ddl = Vec::new();
+                while let Ok(Some(row)) = rows.next().await {
+                    ddl.push(value_to_string(&row, 0));
+                }
+                Ok((Vec::new(), None, Vec::new(), ddl, 0usize, None))
+            })
+        })?;
+        self.error_message = err;
+        Ok(data)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// 缓存键：远程源 = url::token；本地源 = 绝对路径且统一正斜杠（Windows）
+    #[test]
+    fn cache_key_remote_and_local() {
+        let remote = TursoSource::Remote {
+            url: "http://db.local:8080".into(),
+            token: "tok".into(),
+        };
+        assert_eq!(remote.cache_key(), "remote://http://db.local:8080::tok");
+
+        // 绝对路径：Windows 反斜杠归一为正斜杠，同一路径两种写法键一致
+        let abs = std::env::current_dir().unwrap().join("a.db");
+        let p = abs.to_string_lossy().to_string();
+        let s1 = TursoSource::Local(p.clone());
+        let s2 = TursoSource::Local(p.replace('\\', "/"));
+        let k1 = s1.cache_key();
+        assert_eq!(k1, s2.cache_key());
+        assert!(std::path::Path::new(&k1).is_absolute());
+        if cfg!(windows) {
+            assert!(!k1.contains('\\'), "cache_key 应统一为正斜杠");
+        }
     }
 }

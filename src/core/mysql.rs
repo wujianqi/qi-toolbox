@@ -262,6 +262,13 @@ impl MySqlViewer {
                 }
                 Ok::<_, String>(dbs)
             })
+        })
+        .map_err(|e| {
+            crate::core::log::warn(
+                "mysql",
+                &format!("connect {}:{} failed: {}", source.host, source.port, e),
+            );
+            e
         })?;
 
         self.databases = dbs;
@@ -339,8 +346,7 @@ impl MySqlViewer {
                                 .query_first(format!("SELECT COUNT(*) FROM {}", qualified_c))
                                 .await
                                 .unwrap_or(Some(0))
-                                .unwrap_or(0)
-                                .max(0);
+                                .unwrap_or(0);
                             if let Ok(mut cc) = count_cache().lock() {
                                 cc.insert((src_key_c.clone(), key_c.clone()), (Instant::now(), n));
                                 if cc.len() > COUNT_CACHE_MAX {
@@ -472,8 +478,7 @@ impl MySqlViewer {
                     .query_first(format!("SELECT COUNT(*) FROM {}", qualified))
                     .await
                     .unwrap_or(Some(0))
-                    .unwrap_or(0)
-                    .max(0);
+                    .unwrap_or(0);
                 Ok::<_, String>((col_rows, count))
             })
         })?;
@@ -506,6 +511,149 @@ impl MySqlViewer {
                     )
                     .await
                     .map_err(|e| lang::ERR_QUERY_DATA(e.to_string()))?;
+                Ok(rows
+                    .iter()
+                    .map(|r| (0..r.len()).map(|i| value_to_string(&r[i])).collect())
+                    .collect())
+            })
+        })
+    }
+
+    /// 读取建表 DDL：单表 = SHOW CREATE TABLE 原文；整库 = 各表 DDL + 视图定义
+    pub fn export_ddl(
+        &mut self,
+        database: &str,
+        table: Option<&str>,
+    ) -> Result<Vec<String>, String> {
+        let db = database.to_string();
+        let tbl = table.map(|t| t.to_string());
+        run_query(&self.source, move |mut conn| {
+            Box::pin(async move {
+                let targets: Vec<String> = match &tbl {
+                    Some(t) => vec![t.clone()],
+                    None => conn
+                        .exec(
+                            "SELECT TABLE_NAME FROM information_schema.TABLES \
+                             WHERE TABLE_SCHEMA = ? AND TABLE_TYPE = 'BASE TABLE' \
+                             ORDER BY TABLE_NAME",
+                            (&db,),
+                        )
+                        .await
+                        .map_err(|e| lang::ERR_TABLE_INFO(e.to_string()))?,
+                };
+                let mut ddl = Vec::new();
+                for t in &targets {
+                    // SHOW CREATE TABLE 返回两列（表名 + DDL）；无权限的表跳过不阻塞
+                    if let Ok(Some(row)) = conn
+                        .exec_first::<mysql_async::Row, _, _>(
+                            format!("SHOW CREATE TABLE {}.{}", quote_ident(&db), quote_ident(t)),
+                            (),
+                        )
+                        .await
+                    {
+                        if let Some(Some(sql)) = row.get::<Option<String>, usize>(1) {
+                            ddl.push(format!("{};\n", sql.trim_end_matches(';')));
+                        }
+                    }
+                }
+                // 视图定义（整库导出时附带）
+                if tbl.is_none() {
+                    if let Ok(vrows) = conn
+                        .exec::<mysql_async::Row, _, _>(
+                            "SELECT TABLE_NAME, VIEW_DEFINITION FROM information_schema.VIEWS \
+                             WHERE TABLE_SCHEMA = ? ORDER BY TABLE_NAME",
+                            (&db,),
+                        )
+                        .await
+                    {
+                        for r in vrows {
+                            let name: String = r.get(0).unwrap_or_default();
+                            let def: String = r.get(1).unwrap_or_default();
+                            if !def.is_empty() {
+                                ddl.push(format!(
+                                    "CREATE VIEW {} AS {};\n",
+                                    quote_ident(&name),
+                                    def
+                                ));
+                            }
+                        }
+                    }
+                }
+                Ok::<_, String>(ddl)
+            })
+        })
+    }
+
+    /// 检测表的单列主键（复合主键/无主键返回 None，导出时回退 OFFSET）
+    pub fn export_pk(&mut self, table: &TableRef) -> Result<Option<String>, String> {
+        let db = table.database.clone();
+        let tbl = table.table.clone();
+        run_query(&self.source, move |mut conn| {
+            Box::pin(async move {
+                let rows: Vec<String> = conn
+                    .exec(
+                        "SELECT COLUMN_NAME FROM information_schema.KEY_COLUMN_USAGE \
+                         WHERE TABLE_SCHEMA = ? AND TABLE_NAME = ? \
+                           AND CONSTRAINT_NAME = 'PRIMARY' \
+                         ORDER BY ORDINAL_POSITION",
+                        (db, tbl),
+                    )
+                    .await
+                    .map_err(|e| lang::ERR_TABLE_INFO(e.to_string()))?;
+                Ok::<_, String>(if rows.len() == 1 {
+                    Some(rows[0].clone())
+                } else {
+                    None
+                })
+            })
+        })
+    }
+
+    /// 主键游标分批取行：WHERE pk > last ORDER BY pk（O(n)，不受中途增删行影响）。
+    /// 返回空批 = 已到表尾。仅适用单列主键（export_pk 返回 None 时上层回退 OFFSET）。
+    pub fn export_batch_keyset(
+        &mut self,
+        table: &TableRef,
+        pk_col: &str,
+        last_pk: Option<String>,
+        limit: usize,
+    ) -> Result<Vec<Vec<String>>, String> {
+        let qualified = format!(
+            "{}.{}",
+            quote_ident(&table.database),
+            quote_ident(&table.table)
+        );
+        let pk_col = pk_col.to_string();
+        run_query(&self.source, move |mut conn| {
+            Box::pin(async move {
+                // 首批无游标：省略 WHERE（pk > NULL 恒为假，不能拼进去）
+                let sql = match &last_pk {
+                    None => format!(
+                        "SELECT * FROM {} ORDER BY {} LIMIT {}",
+                        qualified,
+                        quote_ident(&pk_col),
+                        limit
+                    ),
+                    Some(_) => format!(
+                        "SELECT * FROM {} WHERE {} > ? ORDER BY {} LIMIT {}",
+                        qualified,
+                        quote_ident(&pk_col),
+                        quote_ident(&pk_col),
+                        limit
+                    ),
+                };
+                let rows: Vec<mysql_async::Row> = match &last_pk {
+                    None => conn.exec(sql, ()).await,
+                    Some(s) => {
+                        // 数值主键按整数传参（避免字符串比较破坏数值序）；其余按字符串
+                        let val = match s.parse::<i64>() {
+                            Ok(n) => mysql_async::Value::Int(n),
+                            Err(_) => mysql_async::Value::Bytes(s.clone().into_bytes()),
+                        };
+                        conn.exec(sql, (val,)).await
+                    }
+                }
+                .map_err(|e| lang::ERR_QUERY_DATA(e.to_string()))?;
                 Ok(rows
                     .iter()
                     .map(|r| (0..r.len()).map(|i| value_to_string(&r[i])).collect())

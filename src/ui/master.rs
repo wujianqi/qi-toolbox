@@ -139,14 +139,10 @@ pub fn build_gate(gate: &MasterGate) -> Element {
                     Element::row()
                         .width_match()
                         .child(Element::flex_spacer())
-                        .child(
-                            Element::button(lang::MASTER_BTN_OK())
-                                .small()
-                                .on_click({
-                                    let gate = gate.clone();
-                                    move |_| gate.confirm_pass()
-                                }),
-                        ),
+                        .child(Element::button(lang::MASTER_BTN_OK()).small().on_click({
+                            let gate = gate.clone();
+                            move |_| gate.confirm_pass()
+                        })),
                 ),
         )
         .child(Element::flex_spacer())

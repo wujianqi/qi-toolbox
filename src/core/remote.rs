@@ -1062,26 +1062,24 @@ fn run_security_check(ep: &RemoteEndpoint) -> Result<SecInfo, String> {
     // ① 敏感路径暴露（高）：探测清单内路径是否返回 2xx 且非重定向
     for path in SENSITIVE_PATHS {
         let url = format!("/{}/", path.trim_matches('/'));
-        match http_get_headers(&ep.scheme, &ep.host, ep.port, &url) {
-            Ok((code, _)) => {
-                if (200..300).contains(&code) {
-                    findings.push(SecFinding {
-                        level: SecLevel::High,
-                        title: lang::SEC_PATH_EXPOSED(*path).to_string(),
-                        detail: lang::SEC_PATH_DETAIL(code as u64).to_string(),
-                    });
-                } else {
-                    passed += 1;
-                }
+        if let Ok((code, _)) = http_get_headers(&ep.scheme, &ep.host, ep.port, &url) {
+            if (200..300).contains(&code) {
+                findings.push(SecFinding {
+                    level: SecLevel::High,
+                    title: lang::SEC_PATH_EXPOSED(*path).to_string(),
+                    detail: lang::SEC_PATH_DETAIL(code as u64).to_string(),
+                });
+            } else {
+                passed += 1;
             }
-            // 请求失败（连接拒绝/超时等）：跳过该项，不算通过也不算漏洞
-            Err(_) => {}
         }
+        // 请求失败（连接拒绝/超时等）：跳过该项，不算通过也不算漏洞
     }
 
     // ② 安全响应头缺失（中）
     let (_, headers) = http_get_headers(&ep.scheme, &ep.host, ep.port, &ep.path)?;
-    let sec_headers: &[(&str, fn() -> String)] = &[
+    type HeaderCheck = (&'static str, fn() -> String);
+    let sec_headers: &[HeaderCheck] = &[
         ("strict-transport-security", lang::SEC_HSTS),
         ("content-security-policy", lang::SEC_CSP),
         ("x-frame-options", lang::SEC_XFO),

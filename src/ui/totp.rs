@@ -26,6 +26,8 @@ pub struct TotpUi {
     pub key_sel: Signal<usize>,
     /// 生成密钥位数下拉索引：0 = 32 位（160bit），1 = 16 位（80bit）
     pub key_bits: Signal<usize>,
+    /// 生成验证码后自动复制剪贴板：0 = 关，1 = 开（记忆于 settings）
+    pub auto_copy: Signal<usize>,
 }
 
 impl TotpUi {
@@ -40,6 +42,12 @@ impl TotpUi {
             keys: signal(crate::core::store::totp_list().unwrap_or_default()),
             key_sel: signal(0usize),
             key_bits: signal(0usize),
+            auto_copy: signal(
+                crate::core::settings::load()
+                    .get("totp.auto_copy")
+                    .map(|s| s == "1")
+                    .unwrap_or(true) as usize,
+            ),
         }
     }
 }
@@ -59,8 +67,6 @@ pub fn build_totp_tab(ui: &TotpUi) -> (Element, Element) {
         algo_sel,
         output,
         qr,
-        keys: _,
-        key_sel: _,
         ..
     } = ui.clone();
 
@@ -83,10 +89,10 @@ pub fn build_totp_tab(ui: &TotpUi) -> (Element, Element) {
 
     // 生成密钥（位数下拉：16 位 / 32 位）
     let gen_key = {
-        let (key, key_bits) = (key.clone(), ui.key_bits);
+        let (key, key_bits) = (key, ui.key_bits);
         Element::button(lang::TOTP_GEN_KEY())
             .neutral()
-            .icon_content(icons::stateful_icon(icons::KEY, Some(16)))
+            .icon_content(icons::stateful_icon(icons::KEY))
             .on_click(move |_| {
                 // 下拉索引 0 = 32 位（160bit），1 = 16 位（80bit）
                 let bits = if key_bits.get() == 1 { 16 } else { 32 };
@@ -97,24 +103,35 @@ pub fn build_totp_tab(ui: &TotpUi) -> (Element, Element) {
     };
 
     // 生成验证码
-    let generate = Element::button(lang::TOTP_GENERATE())
-        .neutral()
-        .icon_content(icons::stateful_icon(icons::ZAP, Some(16)))
-        .on_click(move |_| {
-            // 记忆当前配置（账号/发行方/算法/密钥；密钥属敏感项，加密落盘）
-            remember_totp(key, account, issuer, algo_sel);
-            let k = key.get();
-            if !k.trim().is_empty() {
-                output.set(totp::run(k.trim(), totp::algo_from_index(algo_sel.get())));
-            }
-        });
+    let generate = {
+        let (key, algo_sel, output, auto_copy) = (key, algo_sel, output, ui.auto_copy);
+        Element::button(lang::TOTP_GENERATE())
+            .neutral()
+            .icon_content(icons::stateful_icon(icons::ZAP))
+            .on_click(move |ctx| {
+                // 记忆当前配置（账号/发行方/算法/密钥；密钥属敏感项，加密落盘）
+                remember_totp(key, account, issuer, algo_sel);
+                let k = key.get();
+                if k.trim().is_empty() {
+                    return;
+                }
+                let code = totp::run(k.trim(), totp::algo_from_index(algo_sel.get()));
+                // 自动复制开启时，验证码直接进剪贴板（关闭软件时统一清空）
+                if auto_copy.get() == 1 {
+                    ctx.clipboard_set(&code);
+                    super::toast::ok(lang::TOTP_COPIED());
+                } else {
+                    output.set(code);
+                }
+            })
+    };
 
     // 保存密钥到本地 store 数据库（多密钥管理：名称 = 账号@发行方）
     let keys = ui.keys;
     let key_sel = ui.key_sel;
     let save = Element::button(lang::TOTP_SAVE())
         .neutral()
-        .icon_content(icons::stateful_icon(icons::SAVE, Some(16)))
+        .icon_content(icons::stateful_icon(icons::SAVE))
         .on_click(move |_| {
             let k = key.get().trim().to_string();
             if k.is_empty() {
@@ -134,9 +151,9 @@ pub fn build_totp_tab(ui: &TotpUi) -> (Element, Element) {
             if crate::core::store::totp_upsert(&entry).is_ok() {
                 keys.set(crate::core::store::totp_list().unwrap_or_default());
                 key_sel.set(0);
-                output.set(lang::TOTP_SAVED(&entry.secret));
+                super::toast::ok(lang::TOTP_SAVED(&entry.secret));
             } else {
-                output.set(lang::TOTP_SAVE_FAIL(String::from("store write failed")));
+                super::toast::err(lang::TOTP_SAVE_FAIL(String::from("store write failed")));
             }
         });
 
@@ -173,10 +190,63 @@ pub fn build_totp_tab(ui: &TotpUi) -> (Element, Element) {
             }
         });
 
+    // 导入 otpauth:// URI：粘贴 URI → 解析回填（密钥/账号/发行方/算法）→ 直接入库
+    let (imp_key, imp_account, imp_issuer, imp_algo, imp_keys, imp_sel) =
+        (key, account, issuer, algo_sel, ui.keys, ui.key_sel);
+    let import = Element::button(lang::TOTP_IMPORT())
+        .neutral()
+        .icon_content(icons::stateful_icon(icons::DOWNLOAD))
+        .on_click(move |_| {
+            let uri = imp_key.get().trim().to_string();
+            if uri.is_empty() {
+                return;
+            }
+            match totp::parse_otpauth(&uri) {
+                Ok(u) => {
+                    imp_key.set(u.secret.clone());
+                    imp_account.set(u.account.clone());
+                    imp_issuer.set(u.issuer.clone());
+                    imp_algo.set(u.algo);
+                    let entry = crate::core::store::TotpKey {
+                        id: 0,
+                        name: if u.issuer.is_empty() {
+                            u.account.clone()
+                        } else {
+                            format!("{}@{}", u.account, u.issuer)
+                        },
+                        secret: u.secret.clone(),
+                        algo: u.algo as i64,
+                    };
+                    if crate::core::store::totp_upsert(&entry).is_ok() {
+                        imp_keys.set(crate::core::store::totp_list().unwrap_or_default());
+                        imp_sel.set(0);
+                    }
+                    super::toast::ok(lang::TOTP_IMPORT_DONE(entry.name));
+                }
+                Err(e) => super::toast::err(e),
+            }
+        });
+
+    // 自动复制开关（开/关下拉，记忆于 settings）
+    let auto_copy_dd = {
+        let auto_copy = ui.auto_copy;
+        Element::dropdown(
+            vec![lang::TOTP_AUTO_COPY_ON(), lang::TOTP_AUTO_COPY_OFF()],
+            ui.auto_copy,
+        )
+        .width(110)
+        .on_click(move |_| {
+            crate::core::settings::commit(&[(
+                "totp.auto_copy",
+                Some(if auto_copy.get() == 1 { "1" } else { "0" }),
+            )]);
+        })
+    };
+
     // 生成二维码（RGBA → list_signal 渲染）
     let gen_qr = Element::button(lang::TOTP_QR())
         .neutral()
-        .icon_content(icons::stateful_icon(icons::QR, Some(16)))
+        .icon_content(icons::stateful_icon(icons::QR))
         .on_click(move |_| {
             remember_totp(key, account, issuer, algo_sel);
             let k = key.get();
@@ -198,7 +268,7 @@ pub fn build_totp_tab(ui: &TotpUi) -> (Element, Element) {
     let save_png = Element::button(lang::TOTP_SAVE_PNG())
         .small()
         .neutral()
-        .icon_content(icons::stateful_icon(icons::DOWNLOAD, Some(14)))
+        .icon_content(icons::stateful_icon(icons::DOWNLOAD))
         .visible_when(move || has_qr.get())
         .on_click({
             move |_| {
@@ -207,10 +277,10 @@ pub fn build_totp_tab(ui: &TotpUi) -> (Element, Element) {
                 };
                 match crate::widgets::save_qr_png("qrcode.png", entry.w, entry.h, &entry.rgba) {
                     Ok(Some(path)) => {
-                        output.set(lang::TOTP_PNG_SAVED(&path));
+                        super::toast::ok(lang::TOTP_PNG_SAVED(&path));
                     }
                     Ok(None) => {}
-                    Err(e) => output.set(lang::TOTP_PNG_SAVE_FAIL(e)),
+                    Err(e) => super::toast::err(lang::TOTP_PNG_SAVE_FAIL(e)),
                 }
             }
         });
@@ -299,6 +369,7 @@ pub fn build_totp_tab(ui: &TotpUi) -> (Element, Element) {
                         )
                         .child(generate)
                         .child(save)
+                        .child(import)
                         .child(gen_qr),
                 )
                 .child(
@@ -313,7 +384,9 @@ pub fn build_totp_tab(ui: &TotpUi) -> (Element, Element) {
                                 .on_click(key_pick),
                         )
                         .child(key_del_btn)
-                        .child(Element::flex_spacer()),
+                        .child(Element::flex_spacer())
+                        .child(Element::label(lang::TOTP_AUTO_COPY_LABEL()).font_size(13.0))
+                        .child(auto_copy_dd),
                 ),
         ))
         .child(card(

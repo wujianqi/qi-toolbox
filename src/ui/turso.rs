@@ -7,7 +7,7 @@ use std::rc::Rc;
 
 use windui::prelude::*;
 
-use super::{icons, sink, sql, table};
+use super::{icons, sink_opt, sql, table};
 use crate::core;
 use crate::core::store::TursoDb;
 use crate::core::turso::{self, TursoSource};
@@ -38,12 +38,9 @@ pub struct TursoUi {
     pub table_meta: Signal<Vec<core::db::TablePage>>,
     pub table_rows: Signal<Vec<Vec<String>>>,
     pub table_title: Signal<String>,
-    pub status: Signal<String>,
-    pub error: Signal<String>,
     pub show_sql: Signal<bool>,
     pub show_cols: Signal<bool>,
     pub sql_query: Signal<String>,
-    pub sql_status: Signal<String>,
     pub table_loading: Signal<bool>,
     pub pending_table: Signal<Option<(String, usize)>>,
     /// 导出状态：空=空闲，[(已完成行, 总行)]=导出中（Vec 包装以配合 host_signal）
@@ -70,12 +67,9 @@ impl TursoUi {
             table_meta: signal(Vec::new()),
             table_rows: signal(Vec::new()),
             table_title: signal(lang::DT_TABLE_LIST(0)),
-            status: signal(String::new()),
-            error: signal(String::new()),
             show_sql: signal(false),
             show_cols: signal(false),
             sql_query: signal(String::new()),
-            sql_status: signal(String::new()),
             table_loading: signal(false),
             pending_table: signal(None),
             export_progress: signal(Vec::new()),
@@ -89,12 +83,8 @@ impl TursoUi {
     }
 
     /// 取后台任务通道发送端（UI 构建前已回填）
-    pub fn tx(&self) -> Sender<core::db::DbMsg> {
-        self.tx
-            .borrow()
-            .as_ref()
-            .expect("turso tx 已在 run() 中回填")
-            .clone()
+    pub fn tx(&self) -> Option<Sender<core::db::DbMsg>> {
+        self.tx.borrow().clone()
     }
 
     /// 当前选中的库源（无库返回 None——连接按钮此时已禁用）
@@ -132,10 +122,9 @@ impl TursoUi {
                 self.table_meta.set(Vec::new());
                 self.table_rows.set(Vec::new());
                 self.table_title.set(lang::DT_TABLE_LIST(count));
-                self.error.set(String::new());
-                self.status.set(lang::TURSO_CONNECTED(&fname, count));
+                super::toast::ok(lang::TURSO_CONNECTED(&fname, count));
             }
-            core::db::DbMsg::Connected(Err(e)) => self.error.set(e),
+            core::db::DbMsg::Connected(Err(e)) => super::toast::err(e),
             core::db::DbMsg::TableLoaded(Ok(page_data)) => {
                 self.apply_page(page_data);
                 // 节流续接：本次加载完成，若连点期间有排队表则继续加载
@@ -144,18 +133,18 @@ impl TursoUi {
                     self.pending_table.set(None);
                     self.table_loading.set(true);
                     if let Some(src) = self.make_source() {
-                        core::db::spawn_load_table(sink(self.tx()), src, t.0, t.1);
+                        core::db::spawn_load_table(sink_opt(self.tx()), src, t.0, t.1);
                     }
                 }
             }
             core::db::DbMsg::TableLoaded(Err(e)) => {
-                self.error.set(e);
+                super::toast::err(e);
                 self.table_loading.set(false);
                 if let Some(t) = self.pending_table.get() {
                     self.pending_table.set(None);
                     self.table_loading.set(true);
                     if let Some(src) = self.make_source() {
-                        core::db::spawn_load_table(sink(self.tx()), src, t.0, t.1);
+                        core::db::spawn_load_table(sink_opt(self.tx()), src, t.0, t.1);
                     }
                 }
             }
@@ -163,22 +152,21 @@ impl TursoUi {
                 let cols = page_data.columns.len();
                 let rows = page_data.row_count;
                 self.apply_page(page_data);
-                self.sql_status.set(lang::TURSO_SQL_STATUS(cols, rows));
-                self.error.set(String::new());
+                super::toast::ok(lang::TURSO_SQL_STATUS(cols, rows));
             }
             core::db::DbMsg::SqlDone(Err(e)) => {
-                self.sql_status.set(format!("\u{274C} {}", e));
+                super::toast::err(e);
             }
             core::db::DbMsg::ExportProgress { done, total } => {
                 self.export_progress.set(vec![(done, total)]);
             }
             core::db::DbMsg::ExportDone(Ok(path)) => {
                 self.export_progress.set(Vec::new());
-                self.status.set(lang::TURSO_EXPORT_DONE(&path));
+                super::toast::ok(lang::TURSO_EXPORT_DONE(&path));
             }
             core::db::DbMsg::ExportDone(Err(e)) => {
                 self.export_progress.set(Vec::new());
-                self.error.set(e);
+                super::toast::err(e);
             }
         }
     }
@@ -207,7 +195,6 @@ impl TursoUi {
             sql_status: None,
         }]);
         self.table_rows.set(rows);
-        self.error.set(String::new());
     }
 }
 
@@ -230,12 +217,9 @@ pub fn build_turso_tab(ui: &TursoUi) -> (Element, Element, Element) {
         table_meta,
         table_rows,
         table_title,
-        status,
-        error,
         show_sql,
         show_cols,
         sql_query,
-        sql_status,
         table_loading,
         pending_table,
         export_progress,
@@ -254,7 +238,7 @@ pub fn build_turso_tab(ui: &TursoUi) -> (Element, Element, Element) {
     let connect_btn = || {
         Element::button(lang::TURSO_CONNECT())
             .neutral()
-            .icon_content(icons::stateful_icon(icons::PLUG, Some(16)))
+            .icon_content(icons::stateful_icon(icons::PLUG))
             .small()
             .visible_when(move || !connected.get())
             .enabled_when(move || !dbs.get().is_empty())
@@ -265,7 +249,7 @@ pub fn build_turso_tab(ui: &TursoUi) -> (Element, Element, Element) {
                     let Some(src) = ui_c.make_source() else {
                         return;
                     };
-                    core::db::spawn_connect(sink(tx_connect.clone()), src);
+                    core::db::spawn_connect(sink_opt(tx_connect.clone()), src);
                 }
             })
     };
@@ -274,7 +258,7 @@ pub fn build_turso_tab(ui: &TursoUi) -> (Element, Element, Element) {
     let disconnect_btn = || {
         Element::button(lang::TURSO_DISCONNECT())
             .neutral()
-            .icon_content(icons::stateful_icon(icons::PLUG, Some(16)))
+            .icon_content(icons::stateful_icon(icons::PLUG))
             .small()
             .visible_when(move || connected.get())
             .on_click(move |_| {
@@ -287,8 +271,6 @@ pub fn build_turso_tab(ui: &TursoUi) -> (Element, Element, Element) {
                 table_title.set(lang::DT_TABLE_LIST(0));
                 show_sql.set(false);
                 show_cols.set(false);
-                status.set(String::new());
-                error.set(String::new());
             })
     };
 
@@ -297,7 +279,7 @@ pub fn build_turso_tab(ui: &TursoUi) -> (Element, Element, Element) {
     let ms_refresh = make_source.clone();
     let refresh = Element::button(lang::TURSO_REFRESH())
         .neutral()
-        .icon_content(icons::stateful_icon(icons::REFRESH, Some(16)))
+        .icon_content(icons::stateful_icon(icons::REFRESH))
         .small()
         .enabled_signal(connected)
         .on_click(move |_| {
@@ -308,16 +290,16 @@ pub fn build_turso_tab(ui: &TursoUi) -> (Element, Element, Element) {
                 let offset = table_meta.get().first().map(|t| t.page_offset).unwrap_or(0);
                 let ms = ms_refresh.clone();
                 if let Some(src) = ms() {
-                    core::db::spawn_load_table(sink(tx_refresh.clone()), src, table, offset);
+                    core::db::spawn_load_table(sink_opt(tx_refresh.clone()), src, table, offset);
                 }
-                status.set(lang::TURSO_REFRESHED().to_string());
+                super::toast::ok(lang::TURSO_REFRESHED());
             }
         });
 
     // SQL 面板开关（文案固定，面板显隐由 visible_when 控制）
     let sql_toggle = Element::button(lang::TURSO_OPEN_SQL())
         .neutral()
-        .icon_content(icons::stateful_icon(icons::TERMINAL, Some(16)))
+        .icon_content(icons::stateful_icon(icons::TERMINAL))
         .small()
         .enabled_signal(connected)
         .on_click(move |_| show_sql.set(!show_sql.get()));
@@ -326,7 +308,7 @@ pub fn build_turso_tab(ui: &TursoUi) -> (Element, Element, Element) {
     // 需连接且已选中表才可设置。
     let cols_toggle = Element::button(lang::DT_COLS())
         .neutral()
-        .icon_content(icons::stateful_icon(icons::TABLE_ICON, Some(16)))
+        .icon_content(icons::stateful_icon(icons::TABLE_ICON))
         .small()
         .enabled_when(move || connected.get() && selected.get().is_some())
         .on_click(move |_| show_cols.set(!show_cols.get()));
@@ -361,9 +343,29 @@ pub fn build_turso_tab(ui: &TursoUi) -> (Element, Element, Element) {
         .child(
             Element::button(lang::PG_CONN_MGR())
                 .neutral()
-                .icon_content(icons::stateful_icon(icons::SERVER, Some(16)))
+                .icon_content(icons::stateful_icon(icons::SERVER))
                 .small()
-                .on_click(move |_| ui.db_mgr_show.set(true)),
+                .on_click({
+                    // 默认进入即新建态：表单填示例数据，可直接改后保存
+                    let (show, id, name, kind, path, url, token) = (
+                        ui.db_mgr_show,
+                        ui.db_edit_id,
+                        ui.db_name,
+                        ui.db_kind,
+                        ui.db_path,
+                        ui.db_url,
+                        ui.db_token,
+                    );
+                    move |_| {
+                        id.set(0);
+                        name.set("示例库".to_string());
+                        kind.set(0);
+                        path.set(String::new());
+                        url.set(String::new());
+                        token.set(String::new());
+                        show.set(true);
+                    }
+                }),
         )
         .child(connect_btn())
         .child(disconnect_btn())
@@ -371,17 +373,7 @@ pub fn build_turso_tab(ui: &TursoUi) -> (Element, Element, Element) {
         .child(refresh)
         .child(sql_toggle)
         .child(cols_toggle)
-        .child(Element::flex_spacer())
-        .child(
-            Element::label_signal(error)
-                .font_size(11.0)
-                .fg_role(Role::Danger),
-        )
-        .child(
-            Element::label_signal(status)
-                .font_size(11.0)
-                .fg_role(Role::TextMuted),
-        );
+        .child(Element::flex_spacer());
 
     // 左侧表列表（数据驱动，选中行加亮；点击异步加载，节流防连点卡死）
     let table_list = table::render_table_list(
@@ -472,6 +464,53 @@ pub fn build_turso_tab(ui: &TursoUi) -> (Element, Element, Element) {
     // 构建闭包是 move，预克隆 sender（原 tx 留给下方 SQL 面板）
     let page_bar_tx = tx.clone();
     let ui_pb = ui.clone(); // host_signal 闭包是 Fn：每次重建克隆一份供内部回调
+
+    // 导出整库结构 DDL（无进度：DDL 量小，通常秒级完成）。
+    // 紧凑图标按钮：挂表列表标题行右端，tooltip 说明用途。
+    // 定义在 page_bar 闭包外：标题行在外层作用域，闭包内定义取不到
+    let ddl_tx = page_bar_tx.clone();
+    let ui_ddl = ui.clone();
+    let export_ddl = Element::button(String::new())
+        .small()
+        .neutral()
+        .outline_soft()
+        .icon_content(icons::stateful_icon(icons::EXPORT))
+        .tooltip(lang::DT_EXPORT_SCHEMA_TITLE())
+        // 未连接（无可用库源）时禁用，避免对空源导出
+        .enabled_when(move || {
+            connected.get() && !table_loading.get() && export_progress.get().is_empty()
+        })
+        .on_click(move |ctx| {
+            let src_c = ui_ddl.make_source();
+            let tx_c = ddl_tx.clone();
+            ctx.request_save_file(
+                PickDialog::new()
+                    .title(lang::DT_EXPORT_SCHEMA_TITLE())
+                    .filter("SQL", &["sql"])
+                    .file_name("schema.sql"),
+                move |path: Option<PathBuf>| {
+                    if let (Some(dest), Some(src)) = (path, src_c) {
+                        let dest = if dest
+                            .extension()
+                            .map(|e| e.eq_ignore_ascii_case("sql"))
+                            .unwrap_or(false)
+                        {
+                            dest
+                        } else {
+                            dest.with_extension("sql")
+                        };
+                        // turso 单库无分组：group 传空串
+                        core::db::spawn_export_schema(
+                            sink_opt(tx_c),
+                            core::db::DbSource::Turso(src),
+                            String::new(),
+                            dest,
+                        );
+                    }
+                },
+            )
+        });
+
     let page_bar = Element::host_signal(table_meta, move |t: core::db::TablePage| {
         let ui = ui_pb.clone();
         // 未选中表、或正查看某行详情（非列表视图）时都不显示分页——
@@ -502,7 +541,7 @@ pub fn build_turso_tab(ui: &TursoUi) -> (Element, Element, Element) {
                 }
                 table_loading.set(true);
                 if let Some(src) = ui2.make_source() {
-                    core::db::spawn_load_table(sink(tx.clone()), src, name.clone(), offset);
+                    core::db::spawn_load_table(sink_opt(tx.clone()), src, name.clone(), offset);
                 }
             }
         });
@@ -557,7 +596,49 @@ pub fn build_turso_tab(ui: &TursoUi) -> (Element, Element, Element) {
                             } else {
                                 dest.with_extension("csv")
                             };
-                            core::db::spawn_export_csv(sink(tx_c), src, table_c, dest);
+                            core::db::spawn_export_csv(sink_opt(tx_c), src, table_c, dest);
+                        }
+                    },
+                );
+            });
+
+        // 导出单表 SQL INSERT（分批流式，进度同 CSV 通道）
+        let sql_tx = page_bar_tx.clone();
+        let ui4 = ui.clone();
+        let sql_name = name.clone();
+        let export_sql = Element::button(lang::DT_EXPORT_SQL())
+            .small()
+            .neutral()
+            .outline_soft()
+            .enabled_when(move || !table_loading.get() && export_progress.get().is_empty())
+            .on_click(move |ctx| {
+                let tx_c = sql_tx.clone();
+                let table_c = sql_name.clone();
+                let src_c = ui4.make_source();
+                ctx.request_save_file(
+                    PickDialog::new()
+                        .title(lang::DT_EXPORT_TITLE())
+                        .filter("SQL", &["sql"])
+                        .file_name(format!("{}.sql", table_c)),
+                    move |path: Option<PathBuf>| {
+                        if let (Some(dest), Some(src)) = (path, src_c) {
+                            let dest = if dest
+                                .extension()
+                                .map(|e| e.eq_ignore_ascii_case("sql"))
+                                .unwrap_or(false)
+                            {
+                                dest
+                            } else {
+                                dest.with_extension("sql")
+                            };
+                            // turso 单库无 schema 前缀：group 传空串
+                            core::db::spawn_export_sql(
+                                sink_opt(tx_c),
+                                core::db::DbSource::Turso(src),
+                                String::new(),
+                                table_c,
+                                dest,
+                            );
                         }
                     },
                 );
@@ -599,8 +680,20 @@ pub fn build_turso_tab(ui: &TursoUi) -> (Element, Element, Element) {
             )
             .child(next)
             .child(export)
+            .child(export_sql)
             .child(progress_row)
     });
+
+    // SQL 查询面板 + 查询管理弹窗（弹窗由调用方挂根层级，遮罩铺满整窗）
+    let (sql_panel_el, sql_mgr) = sql::render_sql_panel(
+        sql_query,
+        connected,
+        move || core::db::DbSource::Turso(fallback_source(make_source.clone()())),
+        tx,
+        LexerKind::Sql,
+        "turso",
+    );
+    let sql_panel_el = sql_panel_el.visible_when(move || show_sql.get());
 
     let page = Element::col()
         .padding(12)
@@ -614,6 +707,7 @@ pub fn build_turso_tab(ui: &TursoUi) -> (Element, Element, Element) {
                 .child(
                     Element::col()
                         .width(210)
+                        .height_match()
                         .spacing(4)
                         .child(
                             // 表列表面板标题：图标 + 表数，与内容区顶部对齐更有分区感
@@ -625,11 +719,13 @@ pub fn build_turso_tab(ui: &TursoUi) -> (Element, Element, Element) {
                                 .padding_xy(4, 0)
                                 .child(
                                     Element::image_content(
-                                        ImageContent::from_svg_bytes(icons::TABLE_ICON, Some(14))
-                                            .tint(
-                                                Role::TextMuted.resolve(&windui::theme::current()),
-                                            ),
+                                        ImageContent::from_svg_bytes(icons::TABLE_ICON, None).tint(
+                                            Role::TextMuted.resolve(&windui::theme::current()),
+                                        ),
                                     )
+                                    // 矢量源固有 24dp：钉回原 Some(14) 的逻辑尺寸
+                                    .width(14)
+                                    .height(14)
                                     .align(Align::Center),
                                 )
                                 .child(
@@ -639,12 +735,18 @@ pub fn build_turso_tab(ui: &TursoUi) -> (Element, Element, Element) {
                                         .fg_role(Role::TextMuted)
                                         .max_lines(1)
                                         .weight(1.0),
-                                ),
+                                )
+                                .child(export_ddl),
                         )
+                        // 卡片容器收住列表：height_match 会按父整高分配、加标题行
+                        // 后底部穿出窗体，须用 weight 占剩余高度
                         .child(
                             Element::scroll()
                                 .width_match()
-                                .height_match()
+                                .weight(1.0)
+                                .bg_role(Role::SurfaceAlt)
+                                .corner(8.0)
+                                .padding(6)
                                 .child(table_list.weight(1.0)),
                         ),
                 )
@@ -661,23 +763,20 @@ pub fn build_turso_tab(ui: &TursoUi) -> (Element, Element, Element) {
                         .child(page_bar),
                 ),
         )
-        .child(
-            sql::render_sql_panel(
-                sql_query,
-                sql_status,
-                connected,
-                move || {
-                    core::db::DbSource::Turso(fallback_source(make_source.clone()()))
-                },
-                tx,
-                LexerKind::Sql,
-                "turso",
-            )
-            .visible_when(move || show_sql.get()),
-        );
+        // 查询管理弹窗随面板返回，由调用方挂根层级（ModalScrim 遮罩铺满根节点）
+        .child(sql_panel_el);
 
-    // 页面（弹窗由调用方挂根层级：ModalScrim 遮罩铺满根节点，模态覆盖整窗）
-    (page, col_dialog, build_turso_db_mgr(&ui))
+    // 弹窗由调用方挂根层级：ModalScrim 遮罩铺满根节点，模态覆盖整窗。
+    // 容器必须 stack（fill）：col 会让首个 fill 子吃掉全部高度，弹窗拿不到尺寸、
+    // 遮罩不铺满全窗
+    (
+        page,
+        col_dialog,
+        Element::stack()
+            .fill()
+            .child(build_turso_db_mgr(&ui))
+            .child(sql_mgr),
+    )
 }
 
 /// Turso 库源管理弹窗：单层双栏（左库列表 + 右表单），保存/删除同层完成。
@@ -738,7 +837,7 @@ fn build_turso_db_mgr(ui: &TursoUi) -> Element {
         .small()
         .neutral()
         .outline_soft()
-        .icon_content(icons::stateful_icon(icons::FOLDER, Some(14)))
+        .icon_content(icons::stateful_icon(icons::FOLDER))
         .on_click({
             let db_path = ui.db_path;
             move |ctx| {
@@ -759,13 +858,8 @@ fn build_turso_db_mgr(ui: &TursoUi) -> Element {
 
     let form_save = Element::button(lang::SFTP_SITE_SAVE()).small().on_click({
         let (id, _show) = (ui.db_edit_id, ui.db_mgr_show);
-        let (name, kind, path, url, token) = (
-            ui.db_name,
-            ui.db_kind,
-            ui.db_path,
-            ui.db_url,
-            ui.db_token,
-        );
+        let (name, kind, path, url, token) =
+            (ui.db_name, ui.db_kind, ui.db_path, ui.db_url, ui.db_token);
         let dbs = ui.dbs;
         move |_| {
             let n = name.get().trim().to_string();
@@ -833,10 +927,7 @@ fn build_turso_db_mgr(ui: &TursoUi) -> Element {
         .width_match()
         .spacing(6)
         .visible_when(move || ui.db_kind.get() == 0)
-        .child(
-            Element::text_input(ui.db_path, lang::TURSO_PATH_HINT())
-                .width_match(),
-        )
+        .child(Element::text_input(ui.db_path, lang::TURSO_PATH_HINT()).width_match())
         .child(pick_btn);
     let remote_rows = Element::col()
         .width_match()
@@ -847,10 +938,7 @@ fn build_turso_db_mgr(ui: &TursoUi) -> Element {
                 .autofocus()
                 .width_match(),
         )
-        .child(
-            Element::text_input(ui.db_token, lang::TURSO_TOKEN_HINT())
-                .width_match(),
-        );
+        .child(Element::text_input(ui.db_token, lang::TURSO_TOKEN_HINT()).width_match());
     let mgr_body = Element::row()
         .width_match()
         .height(320)
