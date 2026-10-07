@@ -63,7 +63,14 @@ fn main() {
             .build()
             .expect("runtime 失败");
         rt.block_on(async move {
-            let url = format!("mysql://{}@{}:{}/mysql", s.user, s.host, s.port);
+            // 与步骤 1 一致携带密码（CI 服务 root 有密码，空密码仅本机开发场景）
+            let url = format!(
+                "mysql://{}:{}@{}:{}/mysql",
+                s.user,
+                urlencoding_pass(&s.pass),
+                s.host,
+                s.port
+            );
             let opts = mysql_async::Opts::from_url(&url).expect("URL 解析失败");
             let mut conn = mysql_async::Conn::new(opts).await.expect("MySQL 连接失败");
             use mysql_async::prelude::Queryable;
