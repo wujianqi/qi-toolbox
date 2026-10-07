@@ -7,7 +7,7 @@ panic = "abort"     # 减少 unwind 表
 
 [package]
 name = "qi-toolbox"
-version = "0.2.1"
+version = "0.2.2"
 edition = "2021"
 description = "奇兔宝 (Qi Toolbox) - 2FA验证码、随机密码、数据库浏览(Turso/MySQL/PG)、SFTP/SSH、S3浏览、远程检测"
 license = "MIT"
@@ -21,9 +21,13 @@ path = "src/main.rs"
 name = "qi_toolbox"
 path = "src/lib.rs"
 
-# Windows GUI 应用程序，不显示控制台窗口
-[package.metadata.winres]
+# Windows 资源（build.rs 经 winresource 写入 exe）：文件名元数据 + logo.ico 图标
+[package.metadata.winresource]
 OriginalFilename = "qi-toolbox.exe"
+
+[build-dependencies]
+# 只在 Windows 目标上被 build.rs 调用（CARGO_CFG_TARGET_OS 判定）；crate 本体极小
+winresource = "0.1"
 
 [features]
 default = []
@@ -58,8 +62,10 @@ mysql_async = "0.37.1"
 tokio-postgres = "0.7.18"
 
 [target.'cfg(unix)'.dependencies]
-# CI/Linux 编译需要：rfd 0.17（windui 传递依赖）在非 Windows 平台必须二选一后端
-rfd = { version = "0.17", features = ["xdg-portal"] }
+# CI/Linux 编译需要：rfd 0.17（windui 传递依赖）在非 Windows 平台必须二选一后端。
+# 必须关 default（内含 wayland feature 会经 wayland-backend/client_system 拉进
+# wayland-sys，编译期就要 pkg-config 找系统 libwayland）；xdg-portal 是运行时 D-Bus 门户。
+rfd = { version = "0.17", default-features = false, features = ["xdg-portal"] }
 
 [target.'cfg(windows)'.dependencies]
 windows-sys = { version = "0.52", features = ["Win32_Foundation", "Win32_Globalization", "Win32_Security_Cryptography", "Win32_System_Console", "Win32_System_Registry", "Win32_UI_WindowsAndMessaging"] }
