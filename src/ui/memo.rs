@@ -149,7 +149,12 @@ pub fn build_memo_tab(ui: &MemoUi) -> Element {
             Element::row()
                 .width_match()
                 .cross(Align::Center)
-                .child(Element::label(lang::MEMO_LIST_TITLE()).font_size(13.0).font_weight(600).fg_role(Role::Text))
+                .child(
+                    Element::label(lang::MEMO_LIST_TITLE())
+                        .font_size(13.0)
+                        .font_weight(600)
+                        .fg_role(Role::Text),
+                )
                 .child(Element::flex_spacer())
                 .child(all_btn),
         )
@@ -181,7 +186,11 @@ fn memo_list_view(ui: MemoUi) -> Element {
         let items: Vec<Memo> = if day_now.is_empty() {
             list_v.get()
         } else {
-            list_v.get().into_iter().filter(|m| m.day == day_now).collect()
+            list_v
+                .get()
+                .into_iter()
+                .filter(|m| m.day == day_now)
+                .collect()
         };
         if items.is_empty() {
             return Element::label(if day_now.is_empty() {
@@ -192,15 +201,12 @@ fn memo_list_view(ui: MemoUi) -> Element {
             .font_size(12.0)
             .fg_role(Role::TextMuted);
         }
-        Element::scroll()
-            .fill()
-            .width_match()
-            .child(
-                Element::col()
-                    .width_match()
-                    .spacing(6)
-                    .children(items.into_iter().map(|m| memo_card(ui.clone(), m))),
-            )
+        Element::scroll().fill().width_match().child(
+            Element::col()
+                .width_match()
+                .spacing(6)
+                .children(items.into_iter().map(|m| memo_card(ui.clone(), m))),
+        )
     })
 }
 

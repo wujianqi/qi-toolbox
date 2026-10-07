@@ -354,10 +354,7 @@ pub fn build_password_tab(ui: &PasswordUi) -> Element {
                         .spacing(8)
                         .cross(Align::Center)
                         .child(Element::label(lang::PWD_USED_FOR()).font_size(13.0))
-                        .child(
-                            Element::text_input(used_for, lang::PWD_USED_FOR_HINT())
-                                .width(220),
-                        )
+                        .child(Element::text_input(used_for, lang::PWD_USED_FOR_HINT()).width(220))
                         .child(save_btn),
                 )
                 .child(Element::label(lang::PWD_SAVED_LABEL()).font_size(14.0))

@@ -1,4 +1,3 @@
-
 #[cfg(test)]
 mod tests {
     use crate::core::store::*;
@@ -308,7 +307,10 @@ mod tests {
 
         // 列表应含两条，新插入的在前（updated DESC, id DESC）
         let list = memo_list().expect("list");
-        assert_eq!(list.iter().filter(|m| m.id == id1 || m.id == id2).count(), 2);
+        assert_eq!(
+            list.iter().filter(|m| m.id == id1 || m.id == id2).count(),
+            2
+        );
         let pos1 = list.iter().position(|m| m.id == id1).unwrap();
         let pos2 = list.iter().position(|m| m.id == id2).unwrap();
         assert!(pos2 < pos1, "新备忘应排在前面");
@@ -321,7 +323,10 @@ mod tests {
         let got_updated: i64 = run(Box::new(move |conn: turso::Connection| {
             Box::pin(async move {
                 let mut rows = conn
-                    .query("SELECT updated FROM memos WHERE id = ?1", (id2_str.as_str(),))
+                    .query(
+                        "SELECT updated FROM memos WHERE id = ?1",
+                        (id2_str.as_str(),),
+                    )
                     .await
                     .map_err(|e| e.to_string())?;
                 match rows.next().await.map_err(|e| e.to_string())? {
@@ -334,8 +339,7 @@ mod tests {
         assert_eq!(got_updated, now_secs(), "更新时间应写入当前秒");
 
         // 更新：覆盖标题/内容/日期，id 不变
-        memo_update(id2, &format!("{}-v2", tag), "巡检内存与磁盘", "2026-10-03")
-            .expect("update");
+        memo_update(id2, &format!("{}-v2", tag), "巡检内存与磁盘", "2026-10-03").expect("update");
         let list = memo_list().expect("list after update");
         let m2 = list.iter().find(|m| m.id == id2).unwrap();
         assert_eq!(m2.title, format!("{}-v2", tag));

@@ -312,10 +312,7 @@ fn upload_parts(
     let mut num = etags.len() as u16 + 1;
     // 残留进度文件按行重写（保留已完成片），后续逐片追加
     if !done.is_empty() {
-        let _ = std::fs::write(
-            state_path,
-            format!("{}\n{}", upload_id, done.join("\n")),
-        );
+        let _ = std::fs::write(state_path, format!("{}\n{}", upload_id, done.join("\n")));
     }
     while offset < data.len() {
         let end = (offset + PART).min(data.len());
@@ -374,7 +371,9 @@ pub fn download(c: &S3Cred, key: &str, local_dir: &str) -> Result<String, String
     let dest = std::path::Path::new(local_dir).join(name);
 
     // 先探测远端大小（HEAD），决定续传偏移
-    let head_url = b.head_object(Some(&creds), key).sign(std::time::Duration::from_secs(600));
+    let head_url = b
+        .head_object(Some(&creds), key)
+        .sign(std::time::Duration::from_secs(600));
     let remote_len = match ureq::head(head_url.as_str())
         .timeout(std::time::Duration::from_secs(60))
         .call()
@@ -389,7 +388,9 @@ pub fn download(c: &S3Cred, key: &str, local_dir: &str) -> Result<String, String
     // 断点续传：本地已有部分文件（小于远端大小）则从其大小处续写
     let resume_from = match std::fs::metadata(&dest) {
         Ok(m) if remote_len > 0 && m.len() < remote_len => m.len(),
-        Ok(m) if remote_len > 0 && m.len() == remote_len => return Ok(dest.to_string_lossy().into_owned()),
+        Ok(m) if remote_len > 0 && m.len() == remote_len => {
+            return Ok(dest.to_string_lossy().into_owned())
+        }
         _ => 0,
     };
 

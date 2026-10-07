@@ -67,7 +67,6 @@ pub fn saved_sql_del(id: i64) -> Result<(), String> {
 
 // ────────────────────── SSH 主机指纹（known_hosts，TOFU）──────────────────────
 
-
 /// 历史保留条数（每类连接源各留最近 N 条）
 pub(crate) const SQL_HISTORY_KEEP: usize = 50;
 

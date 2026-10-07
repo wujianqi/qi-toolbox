@@ -41,32 +41,26 @@ pub fn calendar_panel(
 
     // ── 头部：◀ 年月 ▶（翻月 = set 年月 + 触发格子重建）──
     let (ym_p, epoch_p) = (ym, epoch);
-    let prev_btn = Element::button("◀")
-        .small()
-        .neutral()
-        .on_click(move |_| {
-            let (y, m) = ym_p.get();
-            if m == 1 {
-                ym_p.set((y - 1, 12));
-            } else {
-                ym_p.set((y, m - 1));
-            }
-            // 替换式触发重建：push 会让 host_signal 视为新数据无限追加行
-            epoch_p.set(vec![()]);
-        });
+    let prev_btn = Element::button("◀").small().neutral().on_click(move |_| {
+        let (y, m) = ym_p.get();
+        if m == 1 {
+            ym_p.set((y - 1, 12));
+        } else {
+            ym_p.set((y, m - 1));
+        }
+        // 替换式触发重建：push 会让 host_signal 视为新数据无限追加行
+        epoch_p.set(vec![()]);
+    });
     let (ym_n, epoch_n) = (ym, epoch);
-    let next_btn = Element::button("▶")
-        .small()
-        .neutral()
-        .on_click(move |_| {
-            let (y, m) = ym_n.get();
-            if m == 12 {
-                ym_n.set((y + 1, 1));
-            } else {
-                ym_n.set((y, m + 1));
-            }
-            epoch_n.set(vec![()]);
-        });
+    let next_btn = Element::button("▶").small().neutral().on_click(move |_| {
+        let (y, m) = ym_n.get();
+        if m == 12 {
+            ym_n.set((y + 1, 1));
+        } else {
+            ym_n.set((y, m + 1));
+        }
+        epoch_n.set(vec![()]);
+    });
     let ym_label = Element::label_signal(ym.map(|v: &(i32, u32)| {
         let (y, m) = *v;
         format!("{}-{:02}", y, m)
@@ -112,9 +106,7 @@ pub fn calendar_panel(
                     let mut label = Element::label(text).font_size(12.0).align(Align::Center);
                     label = if has_data {
                         // 有数据：加粗绿色
-                        label
-                            .font_weight(700)
-                            .fg(Color::hex(HAS_DATA_GREEN))
+                        label.font_weight(700).fg(Color::hex(HAS_DATA_GREEN))
                     } else {
                         label.font_weight(400).fg_role(Role::Text)
                     };

@@ -237,4 +237,3 @@ pub fn master_cred_set(salt: &str, verifier: &str) -> Result<(), String> {
         })
     }))
 }
-

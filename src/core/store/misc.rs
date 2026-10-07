@@ -15,7 +15,6 @@ pub struct TotpKey {
 
 // ────────────────────── TOTP 密钥 / 保存的密码 / 已存网址 / 备忘录 ──────────────────────
 
-
 fn row_to_key(row: &turso::Row) -> Result<TotpKey, String> {
     let id: i64 = row.get(0).map_err(|e| e.to_string())?;
     let enc = value_to_string(row, 2);
@@ -259,21 +258,12 @@ pub fn memo_list() -> Result<Vec<Memo>, String> {
 
 /// 新增备忘，返回自增 id
 pub fn memo_add(title: &str, content: &str, day: &str) -> Result<i64, String> {
-    let (title, content, day) = (
-        title.to_string(),
-        content.to_string(),
-        day.to_string(),
-    );
+    let (title, content, day) = (title.to_string(), content.to_string(), day.to_string());
     run(Box::new(move |conn: turso::Connection| {
         Box::pin(async move {
             conn.execute(
                 "INSERT INTO memos(title, content, day, updated) VALUES(?1, ?2, ?3, ?4)",
-                (
-                    title.as_str(),
-                    content.as_str(),
-                    day.as_str(),
-                    now_secs(),
-                ),
+                (title.as_str(), content.as_str(), day.as_str(), now_secs()),
             )
             .await
             .map_err(|e| e.to_string())?;

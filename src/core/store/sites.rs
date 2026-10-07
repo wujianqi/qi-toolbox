@@ -554,4 +554,3 @@ pub fn sftp_bmk_del(path: &str) -> Result<(), String> {
         })
     }))
 }
-
