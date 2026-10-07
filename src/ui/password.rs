@@ -160,12 +160,34 @@ pub fn build_password_tab(ui: &PasswordUi) -> Element {
         });
 
     // ── 算法下拉：与目标平台联动 ──
-    // 平台变化时算法自动跟随该平台默认算法（在下拉 on_click 回调里同步——
-    // 构建期禁止写信号，windui 会 panic；此前用 host_signal 在重建时 set，
-    // 切主题整树重建即崩溃）；非「自定义」时算法下拉禁用（算法由平台决定）。
+    // 平台变化时算法自动跟随该平台默认算法——联动用 platform_watch（sig_watch
+    // 监听 platform 版本差分）：Dropdown 控件不接 Element::on_click（回调被
+    // 静默丢弃），此前挂在下拉上的联动实际从未生效。非「自定义」时算法下拉
+    // 禁用（算法由平台决定）。
     let algo_dropdown = Element::dropdown(algo_labels.clone(), algo)
         .width(220)
         .enabled_when(move || platform.get() == 0);
+    let platform_watch = {
+        let platform_w = platform;
+        let algo_w = algo;
+        super::sig_watch::sig_watch(
+            move || platform_w.version(),
+            false,
+            move |_| {
+                let preset = platform_w.get();
+                if preset != 0 {
+                    let def = password::PlatformPreset::all()[preset].default_algorithm();
+                    if let Some(i) = password::HashAlgorithm::all()
+                        .iter()
+                        .position(|&a| a == def)
+                    {
+                        algo_w.set(i);
+                    }
+                }
+            },
+        )
+        .reactive()
+    };
 
     // ── 保存密码：「用于：」备注 + 保存按钮；成功后刷新列表并就地提示 ──
     let save_btn = Element::button(lang::PWD_SAVE())
@@ -246,118 +268,120 @@ pub fn build_password_tab(ui: &PasswordUi) -> Element {
         },
     );
 
-    Element::col()
-        .padding(16)
-        .spacing(12)
-        .child(card(
-            &lang::PWD_CARD_SETUP(),
+    // 页根：原列外包一层 stack，挂 platform_watch（零尺寸叶子，不占布局）
+    Element::stack()
+        .child(
             Element::col()
-                .spacing(10)
-                .child(
-                    // 平台与算法同一行：平台为预设时算法下拉禁用并自动跟随默认算法
-                    Element::row()
-                        .spacing(8)
-                        .cross(Align::Center)
-                        .child(Element::label(lang::PWD_PLATFORM()).font_size(13.0))
+                .padding(16)
+                .spacing(12)
+                .child(card(
+                    &lang::PWD_CARD_SETUP(),
+                    Element::col()
+                        .spacing(10)
                         .child(
-                            Element::dropdown(preset_labels, platform)
-                                .width(220)
-                                .on_click(move |_| {
-                                    // 平台为预设时，算法自动跟随该平台默认算法
-                                    let preset = platform.get();
-                                    if preset != 0 {
-                                        let def = password::PlatformPreset::all()[preset]
-                                            .default_algorithm();
-                                        if let Some(i) = password::HashAlgorithm::all()
-                                            .iter()
-                                            .position(|&a| a == def)
-                                        {
-                                            algo.set(i);
-                                        }
-                                    }
-                                }),
-                        )
-                        .child(Element::label(lang::PWD_ALGO()).font_size(13.0))
-                        .child(algo_dropdown),
-                )
-                .child(
-                    Element::row()
-                        .spacing(8)
-                        .child(gen_btn(8))
-                        .child(gen_btn(12))
-                        .child(gen_btn(16)),
-                )
-                .child(Element::label(lang::PWD_INPUT_LABEL()).font_size(14.0))
-                .child(
-                    Element::row()
-                        .spacing(8)
-                        .child(
-                            Element::text_input(input, lang::PWD_INPUT_HINT())
-                                .width_match()
-                                .weight(1.0),
-                        )
-                        .child(encrypt),
-                )
-                // 校验哈希行：粘贴哈希串 → 用上方密码验证匹配 + 显示算法识别结果
-                .child(
-                    Element::row()
-                        .spacing(8)
-                        .child(
-                            Element::text_input(ui.verify_hash, lang::PWD_VERIFY_HASH_HINT())
-                                .width_match()
-                                .weight(1.0),
-                        )
-                        .child(verify_btn),
-                ),
-        ))
-        // 输出与保存联动：保存密码保存的是上方「加密的密码」输出结果
-        .child(card(
-            &lang::PWD_CARD_OUTPUT(),
-            Element::col()
-                .spacing(10)
-                .child(
-                    Element::row()
-                        .width_match()
-                        .spacing(16)
-                        .child(
-                            Element::col()
-                                .weight(1.0)
-                                .spacing(6)
-                                .child(Element::label(lang::PWD_OUTPUT_LABEL()).font_size(14.0))
-                                // 只读可选文本：输出可拖选/Ctrl+C 复制（不再借输入框承载）
+                            // 平台与算法同一行：平台为预设时算法下拉禁用并自动跟随默认算法
+                            Element::row()
+                                .spacing(8)
+                                .cross(Align::Center)
+                                .child(Element::label(lang::PWD_PLATFORM()).font_size(13.0))
                                 .child(
-                                    select_text(output)
-                                        .font_family("Consolas")
-                                        .font_size(13.0)
-                                        .width_match()
-                                        .height(120),
-                                ),
+                                    // 平台联动算法由 platform_watch（sig_watch）执行
+                                    Element::dropdown(preset_labels, platform).width(220),
+                                )
+                                .child(Element::label(lang::PWD_ALGO()).font_size(13.0))
+                                .child(algo_dropdown),
                         )
                         .child(
-                            Element::col()
-                                .weight(1.0)
-                                .spacing(6)
-                                .child(Element::label(lang::PWD_SQL_LABEL()).font_size(14.0))
-                                // 只读可选文本：SQL 可拖选/Ctrl+C 复制（不再借输入框承载）
+                            Element::row()
+                                .spacing(8)
+                                .child(gen_btn(8))
+                                .child(gen_btn(12))
+                                .child(gen_btn(16)),
+                        )
+                        .child(Element::label(lang::PWD_INPUT_LABEL()).font_size(14.0))
+                        .child(
+                            Element::row()
+                                .spacing(8)
                                 .child(
-                                    select_text(sql_out)
-                                        .font_family("Consolas")
-                                        .font_size(13.0)
+                                    Element::text_input(input, lang::PWD_INPUT_HINT())
                                         .width_match()
-                                        .height(120),
-                                ),
+                                        .weight(1.0),
+                                )
+                                .child(encrypt),
+                        )
+                        // 校验哈希行：粘贴哈希串 → 用上方密码验证匹配 + 显示算法识别结果
+                        .child(
+                            Element::row()
+                                .spacing(8)
+                                .child(
+                                    Element::text_input(
+                                        ui.verify_hash,
+                                        lang::PWD_VERIFY_HASH_HINT(),
+                                    )
+                                    .width_match()
+                                    .weight(1.0),
+                                )
+                                .child(verify_btn),
                         ),
-                )
-                // 保存行：保存对象即上方加密输出；「用于：」为备注
-                .child(
-                    Element::row()
-                        .spacing(8)
-                        .cross(Align::Center)
-                        .child(Element::label(lang::PWD_USED_FOR()).font_size(13.0))
-                        .child(Element::text_input(used_for, lang::PWD_USED_FOR_HINT()).width(220))
-                        .child(save_btn),
-                )
-                .child(Element::label(lang::PWD_SAVED_LABEL()).font_size(14.0))
-                .child(saved_rows),
-        ))
+                ))
+                // 输出与保存联动：保存密码保存的是上方「加密的密码」输出结果
+                .child(card(
+                    &lang::PWD_CARD_OUTPUT(),
+                    Element::col()
+                        .spacing(10)
+                        .child(
+                            Element::row()
+                                .width_match()
+                                .spacing(16)
+                                .child(
+                                    Element::col()
+                                        .weight(1.0)
+                                        .spacing(6)
+                                        .child(
+                                            Element::label(lang::PWD_OUTPUT_LABEL())
+                                                .font_size(14.0),
+                                        )
+                                        // 只读可选文本：输出可拖选/Ctrl+C 复制（不再借输入框承载）
+                                        .child(
+                                            select_text(output)
+                                                .font_family("Consolas")
+                                                .font_size(13.0)
+                                                .width_match()
+                                                .height(120),
+                                        ),
+                                )
+                                .child(
+                                    Element::col()
+                                        .weight(1.0)
+                                        .spacing(6)
+                                        .child(
+                                            Element::label(lang::PWD_SQL_LABEL()).font_size(14.0),
+                                        )
+                                        // 只读可选文本：SQL 可拖选/Ctrl+C 复制（不再借输入框承载）
+                                        .child(
+                                            select_text(sql_out)
+                                                .font_family("Consolas")
+                                                .font_size(13.0)
+                                                .width_match()
+                                                .height(120),
+                                        ),
+                                ),
+                        )
+                        // 保存行：保存对象即上方加密输出；「用于：」为备注
+                        .child(
+                            Element::row()
+                                .spacing(8)
+                                .cross(Align::Center)
+                                .child(Element::label(lang::PWD_USED_FOR()).font_size(13.0))
+                                .child(
+                                    Element::text_input(used_for, lang::PWD_USED_FOR_HINT())
+                                        .width(220),
+                                )
+                                .child(save_btn),
+                        )
+                        .child(Element::label(lang::PWD_SAVED_LABEL()).font_size(14.0))
+                        .child(saved_rows),
+                )),
+        )
+        .child(platform_watch)
 }

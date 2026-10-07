@@ -433,43 +433,22 @@ pub fn build_sftp_tab(ui: &SftpUi) -> (Element, Element) {
     // 收起态字段展开菜单时触发）。故用响应式节点监听 bmk_sel 版本变化来执行跳转。
     // 首次 on_update 必然跑一次（版本从哨兵变为初值），正好相当于"打开软件跳到
     // 选中书签"；删除书签后 `bmk_sel.set(0)` 若索引确有变化也会重跳一次，语义无害。
-    let bmk_sel_ver = bmk_sel.map(|v: &usize| *v);
-    struct SigWatch<F: FnMut(&mut windui::core::EventCtx)> {
-        sig_ver: Box<dyn Fn() -> u64>,
-        last: u64,
-        f: F,
-    }
-    impl<F: FnMut(&mut windui::core::EventCtx)> windui::core::Widget for SigWatch<F> {
-        fn measure(&self, _a: Size, _s: &Style, _t: &mut dyn windui::text::TextEngine) -> Size {
-            Size::ZERO
-        }
-        fn on_update(&mut self, ctx: &mut windui::core::EventCtx) {
-            let ver = (self.sig_ver)();
-            if ver == self.last {
-                return;
+    // 书签跳转：sig_watch 监听 bmk_sel 版本差分执行跳转（Dropdown 选中项只写
+    // 信号、不走 Element::on_click）。fire_first=true：首帧跑一次，相当于
+    // "打开软件跳到选中书签"；删除书签后 bmk_sel.set(0) 重跳一次，语义无害。
+    let bmk_watch = super::sig_watch::sig_watch(move || bmk_sel.version(), true, {
+        let bmks = ui.bmks;
+        let cmd = cmd.clone();
+        move |_| {
+            if let Some(path) = bmks.get().get(bmk_sel.get()) {
+                let _ = cmd.send(sftp::SftpCmd::List {
+                    path: path.clone(),
+                    force: false,
+                });
             }
-            self.last = ver;
-            (self.f)(ctx);
         }
-    }
-    let bmk_watch = Element::leaf()
-        .widget(SigWatch {
-            sig_ver: Box::new(move || bmk_sel_ver.version()),
-            last: u64::MAX,
-            f: {
-                let bmks = ui.bmks;
-                let cmd = cmd.clone();
-                move |_| {
-                    if let Some(path) = bmks.get().get(bmk_sel.get()) {
-                        let _ = cmd.send(sftp::SftpCmd::List {
-                            path: path.clone(),
-                            force: false,
-                        });
-                    }
-                }
-            },
-        })
-        .reactive();
+    })
+    .reactive();
 
     let mkdir_btn = Element::button(lang::SFTP_MKDIR())
         .small()
@@ -645,20 +624,28 @@ pub fn build_sftp_tab(ui: &SftpUi) -> (Element, Element) {
 
     // ── 连接行：站点下拉 + 连接/断开 + 管理站点 + 标签下拉 + SSH 命令 ──
     // （后两项放到连接行，避免顶部文件工具栏过挤）
+    // 切换到不同站点即自动断开旧连接，避免凭据错配：sig_watch 监听 site_sel
+    // 版本差分（Dropdown 控件不接 Element::on_click，回调会被静默丢弃），
+    // 按站点名比较——仅当选中的站点名确实变化时才断开，列表刷新不误伤连接。
+    let site_watch = super::sig_watch::sig_watch(move || site_sel.version(), false, {
+        let sites = ui.sites;
+        let site_sel = ui.site_sel;
+        let cmd = cmd.clone();
+        let last_name = RefCell::new(None::<String>);
+        move |_| {
+            let name = sites.get().get(site_sel.get()).map(|s| s.name.clone());
+            let mut last = last_name.borrow_mut();
+            if *last != name && last.is_some() {
+                let _ = cmd.send(sftp::SftpCmd::Disconnect);
+            }
+            *last = name;
+        }
+    })
+    .reactive();
     let conn_form = Element::row()
         .spacing(6)
         .cross(Align::Center)
-        .child(
-            Element::dropdown_signal(site_opts, site_sel)
-                .width(180)
-                .on_click({
-                    // 切换站点即自动断开旧连接，避免凭据错配
-                    let cmd = cmd.clone();
-                    move |_| {
-                        let _ = cmd.send(sftp::SftpCmd::Disconnect);
-                    }
-                }),
-        )
+        .child(Element::dropdown_signal(site_opts, site_sel).width(180))
         .child(connect)
         .child(disconnect)
         .child(
@@ -1286,6 +1273,8 @@ pub fn build_sftp_tab(ui: &SftpUi) -> (Element, Element) {
     );
     let dialogs = Element::stack()
         .fill()
+        // 切站点自动断开的信号监听（零尺寸叶子，不占布局）
+        .child(site_watch)
         .child(mkdir_dialog)
         .child(delete_dialog)
         .child(perm_dialog)

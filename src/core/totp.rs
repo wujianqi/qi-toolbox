@@ -109,14 +109,6 @@ pub fn generate_totp(secret_key: &str, algorithm: Algorithm) -> Result<String, S
     generate_totp_with_time_step(secret_key, algorithm, 0)
 }
 
-/// 生成 TOTP 验证码并返回输出字符串
-pub fn run(secret_key: &str, algorithm: Algorithm) -> String {
-    match generate_totp(secret_key, algorithm) {
-        Ok(code) => code,
-        Err(e) => e,
-    }
-}
-
 /// 为给定的密钥生成二维码 RGBA 数据（用于2FA配置）
 /// 返回 (rgba_bytes, width, height)
 pub fn generate_qr_code_data(
@@ -174,7 +166,9 @@ pub fn parse_otpauth(uri: &str) -> Result<OtpauthUri, String> {
         Some((l, q)) => (l, q),
         None => (tail, ""),
     };
-    let label = percent_decode(label_raw);
+    // label 段按 otpauth 惯例只做百分号编码（`+` 是合法字面量，不转空格）；
+    // query 值按 application/x-www-form-urlencoded 处理（`+` → 空格）
+    let label = percent_decode(label_raw, false);
 
     // query 参数（同名取首个）
     let mut secret = String::new();
@@ -184,9 +178,15 @@ pub fn parse_otpauth(uri: &str) -> Result<OtpauthUri, String> {
         let Some((k, v)) = pair.split_once('=') else {
             continue;
         };
-        let v = percent_decode(v);
+        let v = percent_decode(v, true);
         match k.to_ascii_lowercase().as_str() {
-            "secret" if secret.is_empty() => secret = v.replace(' ', ""),
+            // 密钥容忍常见污染：空白、`+`、Base32 填充 `=` 一律剔除
+            "secret" if secret.is_empty() => {
+                secret = v
+                    .chars()
+                    .filter(|c| !c.is_whitespace() && *c != '+' && *c != '=')
+                    .collect()
+            }
             "issuer" if issuer_q.is_empty() => issuer_q = v,
             "algorithm" if algo == 0 => {
                 algo = match v.to_ascii_uppercase().as_str() {
@@ -222,14 +222,14 @@ pub fn parse_otpauth(uri: &str) -> Result<OtpauthUri, String> {
     })
 }
 
-/// 百分号解码 + `+` → 空格（application/x-www-form-urlencoded）
-fn percent_decode(s: &str) -> String {
+/// 百分号解码；`plus_as_space` 时 `+` → 空格（application/x-www-form-urlencoded）。
+fn percent_decode(s: &str, plus_as_space: bool) -> String {
     let bytes = s.as_bytes();
     let mut out = Vec::with_capacity(bytes.len());
     let mut i = 0;
     while i < bytes.len() {
         match bytes[i] {
-            b'%' if i + 2 < bytes.len() + 1 && i + 2 < bytes.len() + 1 => {
+            b'%' if i + 2 < bytes.len() => {
                 if let (Some(h), Some(l)) = (
                     bytes.get(i + 1).and_then(|b| (*b as char).to_digit(16)),
                     bytes.get(i + 2).and_then(|b| (*b as char).to_digit(16)),
@@ -241,7 +241,7 @@ fn percent_decode(s: &str) -> String {
                     i += 1;
                 }
             }
-            b'+' => {
+            b'+' if plus_as_space => {
                 out.push(b' ');
                 i += 1;
             }
@@ -296,12 +296,6 @@ mod tests {
     fn totp_rejects_invalid_secret() {
         assert!(generate_totp("not-base32!!", Algorithm::SHA1).is_err());
         assert!(generate_totp("", Algorithm::SHA1).is_err());
-    }
-
-    #[test]
-    fn run_returns_code_or_error_text() {
-        assert_eq!(run(RFC_SECRET, Algorithm::SHA1).len(), 6);
-        assert!(!run("bad!", Algorithm::SHA1).is_empty());
     }
 
     #[test]
@@ -377,6 +371,23 @@ mod tests {
             parse_otpauth("otpauth://hotp/x?secret=JBSWY3DP").is_err(),
             "hotp 拒绝"
         );
+    }
+
+    #[test]
+    fn otpauth_label_plus_is_literal() {
+        // label 段的 `+` 是字面量（不按表单编码转空格）；query 值的 `+` 转空格
+        let u =
+            parse_otpauth("otpauth://totp/Foo+Bar:me+x@y.io?secret=JBSWY3DP&issuer=A+B").unwrap();
+        assert_eq!(u.account, "me+x@y.io");
+        assert_eq!(u.issuer, "A B");
+    }
+
+    #[test]
+    fn otpauth_secret_tolerates_padding_and_junk() {
+        // 带填充 `=`、空白、`+` 的密钥均可清洗出合法 Base32 并直接出码
+        let u = parse_otpauth("otpauth://totp/x?secret=JBSW+Y3DP%20EHPK3PXP======").unwrap();
+        assert_eq!(u.secret, "JBSWY3DPEHPK3PXP");
+        assert!(generate_totp(&u.secret, Algorithm::SHA1).is_ok());
     }
 
     #[test]

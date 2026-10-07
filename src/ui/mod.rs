@@ -37,6 +37,8 @@ mod s3;
 mod sftp;
 mod sftp_row;
 mod shell;
+/// 信号版本监听（Dropdown 选中无回调，差分执行副作用）。
+mod sig_watch;
 mod sql;
 mod ssh_cmd;
 mod table;
@@ -246,6 +248,9 @@ impl AppState {
             core::password::HashAlgorithm::all().len(),
         );
         fill("remote.url", s.remote.url_input);
+        // ── 启动即出码：回填完成后按最终密钥/算法算一次当前验证码（不等首个
+        //    1s tick；若提前算会拿到回填前的默认算法，可能短暂显示错误验证码）──
+        totp::on_tick(&s.totp);
         s
     }
 }
@@ -287,6 +292,13 @@ pub fn run() {
 
     // 全局 toast 通道：各页消息处理（无 EventCtx 的 on_msg）经此弹轻提示
     toast::register(&mut app);
+
+    // TOTP 实时刷新定时器：每秒推进倒计时并让验证码随当前时间滚动
+    // （on_tick 内仅内容变化才写信号，验证码区为空时不产生任何重绘）
+    let totp_state = state.totp.clone();
+    let mut app = app.on_interval(std::time::Duration::from_secs(1), move |_| {
+        totp::on_tick(&totp_state);
+    });
 
     // 更新检查通道：后台线程请求 GitHub Releases，结果回 UI 线程写状态信号
     // （Signal 非 Send，不能跨线程直接 set）；发送端存全局，供手动「检查更新」复用

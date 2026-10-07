@@ -466,15 +466,25 @@ pub fn build_remote_tab(ui: &RemoteUi) -> (Element, Element) {
             }
         }
     });
-    let url_pick = {
-        let saved = ui.saved_urls;
-        let url_sel = ui.url_sel;
-        move |_: &mut windui::core::EventCtx| {
-            if let Some(u) = saved.get().get(url_sel.get()) {
-                url_input.set(u.clone());
+    // 选中已存网址 → 回填输入框。挂根层 dialogs 的 sig_watch 监听 url_sel 版本
+    // 差分（Dropdown 控件不接 Element::on_click，回调会被静默丢弃）。
+    let url_watch = super::sig_watch::sig_watch(
+        {
+            let url_sel = ui.url_sel;
+            move || url_sel.version()
+        },
+        false,
+        {
+            let saved = ui.saved_urls;
+            let url_sel = ui.url_sel;
+            move |_| {
+                if let Some(u) = saved.get().get(url_sel.get()) {
+                    url_input.set(u.clone());
+                }
             }
-        }
-    };
+        },
+    )
+    .reactive();
     let conn_dialog = input_dialog(
         show_conn,
         lang::REMOTE_DIALOG_TITLE(),
@@ -496,14 +506,14 @@ pub fn build_remote_tab(ui: &RemoteUi) -> (Element, Element) {
                     .spacing(8)
                     .cross(Align::Center)
                     .child(
+                        // 选中回填由 url_watch（sig_watch 版本差分）执行
                         Element::dropdown_signal(url_opts, ui.url_sel)
                             .width_match()
                             .weight(1.0)
                             .enabled_when({
                                 let urls = ui.saved_urls;
                                 move || !urls.get().is_empty()
-                            })
-                            .on_click(url_pick),
+                            }),
                     )
                     .child(
                         Element::button(lang::REMOTE_URL_SAVE())
@@ -741,6 +751,7 @@ pub fn build_remote_tab(ui: &RemoteUi) -> (Element, Element) {
     // 弹窗隐藏时不渲染、不拦截命中，无需穿透处理
     let dialogs = Element::stack()
         .fill()
+        .child(url_watch)
         .child(conn_dialog)
         .child(web_detail_dialog)
         .child(qr_dialog);

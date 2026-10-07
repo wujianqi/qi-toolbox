@@ -12,7 +12,7 @@
 
 ## 中文
 
-轻量级一站式服务器快捷管理工具箱，基于 Rust + windui 构建的原生 Windows 桌面应用，集 2FA 验证码生成、账号密码加密、数据库浏览（Turso / MySQL / PostgreSQL）、SFTP 文件管理、S3 对象存储浏览、运维备忘、远程检测（连接 / Ping / SSL 证书 / 响应体 / SEO 分析 / 安全检测）于一体。
+轻量级一站式服务器快捷管理工具箱，基于 Rust + windui 构建的原生 Windows / Linux 桌面应用，集 2FA 验证码生成、账号密码加密、数据库浏览（Turso / MySQL / PostgreSQL）、SFTP 文件管理、S3 对象存储浏览、运维备忘、远程检测（连接 / Ping / SSL 证书 / 响应体 / SEO 分析 / 安全检测）于一体。
 
 ### ✨ 亮点
 
@@ -59,9 +59,9 @@
 #### 2FA TOTP 验证码生成
 
 - 生成兼容主流平台的 Base32 安全密钥
-- 实时生成 6 位 TOTP 验证码（SHA1, 30s 步长）
+- 验证码实时滚动刷新（SHA1, 30s 步长），带剩余秒数倒计时条，无需手动重算
 - 生成 otpauth:// 二维码，可直接扫码配置 Google Authenticator / Authy
-- 支持粘贴 otpauth:// URI 一键导入（迁移 / 备份密钥）
+- 支持粘贴 otpauth:// URI 一键导入（迁移 / 备份密钥），导入后立即出码
 - 生成后自动复制开关，密钥本地保存，方便重复使用
 
 #### 账号密码加密
@@ -101,7 +101,8 @@
 
 前往 [Releases](https://github.com/wujianqi/qi-toolbox/releases) 页面下载最新版本。
 
-- `qi-toolbox.exe` — 单包双语言：启动跟随系统语言（中文系统→中文，否则英文），可在主面板侧栏底部「中 / EN」手动切换
+- `qi-toolbox-<版本>-windows-x64.exe` — 单包双语言：启动跟随系统语言（中文系统→中文，否则英文），可在主面板侧栏底部「中 / EN」手动切换
+- `qi-toolbox-<版本>-linux-x64.tar.gz` — Linux (x86_64) 单文件版，解压后 `chmod +x qi-toolbox` 直接运行；基于 glibc 2.35 构建（Ubuntu 22.04+ / Debian 12+ / RHEL 9+ 等），图形走 X11 或 XWayland，文件对话框依赖 xdg-desktop-portal，字体渲染运行期探测 fontconfig（缺失时回退扫描字体目录）
 
 ### 从源码编译
 
@@ -109,7 +110,8 @@
 
 - [Rust](https://www.rust-lang.org/tools/install) (2021 edition)
 
-> 注：项目目前主要面向 Windows，其他平台未经充分测试。
+> Windows 直接 `cargo build --release`；Linux 需要 X11 运行库（Wayland 会话经 XWayland 运行），
+> 编译本身无需任何系统 -dev 包（窗口/协议实现为纯 Rust）。Linux 未经充分测试，欢迎反馈问题。
 
 #### 编译
 
@@ -117,11 +119,11 @@
 # Debug 版本
 cargo build
 
-# Release 版本（体积优化）
+# Release 版本（体积优化：opt-level=z + fat LTO + strip）
 cargo build --release
 ```
 
-产物位于 `target/release/qi-toolbox.exe`。
+产物位于 `target/release/qi-toolbox.exe`（Windows）/ `target/release/qi-toolbox`（Linux）。
 
 ### 许可证
 
@@ -133,7 +135,7 @@ cargo build --release
 
 ## English
 
-Lightweight one-stop server management toolbox — a native Windows desktop app built with Rust + windui, combining a 2FA authenticator, password hashing, database viewers (Turso / MySQL / PostgreSQL), an SFTP file manager, an S3 object storage browser, an ops memo pad, and remote checks (connect / ping / SSL certificate / response body / SEO analysis / security scan).
+Lightweight one-stop server management toolbox — a native Windows / Linux desktop app built with Rust + windui, combining a 2FA authenticator, password hashing, database viewers (Turso / MySQL / PostgreSQL), an SFTP file manager, an S3 object storage browser, an ops memo pad, and remote checks (connect / ping / SSL certificate / response body / SEO analysis / security scan).
 
 > **Highlights**: the entire app is only ~15 MB — single-file portable build, zero install, no background services; pure-Rust native implementation with instant startup and minimal memory footprint; sensitive data (TOTP secrets, SFTP passwords, etc.) is stored locally with platform encryption (DPAPI on Windows); built-in zh/en bilingual UI follows the system language and can be switched in-app.
 
@@ -182,9 +184,9 @@ Lightweight one-stop server management toolbox — a native Windows desktop app 
 #### 2FA TOTP Authenticator
 
 - Generate Base32 secret keys compatible with major platforms
-- Real-time 6-digit TOTP code generation (SHA1, 30s step)
+- Live rolling 6-digit TOTP codes (SHA1, 30s step) with a countdown bar — no manual refresh
 - Generate otpauth:// QR codes for Google Authenticator / Authy setup
-- Paste an otpauth:// URI to import in one click (key migration / backup)
+- Paste an otpauth:// URI to import in one click (key migration / backup); the code shows immediately after import
 - Auto-copy toggle after generation; save keys locally for reuse
 
 #### Password Hashing
@@ -226,7 +228,8 @@ Lightweight one-stop server management toolbox — a native Windows desktop app 
 
 Visit the [Releases](https://github.com/wujianqi/qi-toolbox/releases) page.
 
-- `qi-toolbox.exe` — Single package with built-in zh/en: follows the system language on startup (Chinese system → Chinese, otherwise English), switchable via the 中/EN toggle at the sidebar bottom
+- `qi-toolbox-<ver>-windows-x64.exe` — Single package with built-in zh/en: follows the system language on startup (Chinese system → Chinese, otherwise English), switchable via the 中/EN toggle at the sidebar bottom
+- `qi-toolbox-<ver>-linux-x64.tar.gz` — Linux (x86_64) single-file build: extract, `chmod +x qi-toolbox` and run; built against glibc 2.35 (Ubuntu 22.04+ / Debian 12+ / RHEL 9+, etc.), renders via X11 or XWayland, file dialogs need xdg-desktop-portal, fonts probed via fontconfig at runtime (falls back to scanning font directories)
 
 ### Build from Source
 
@@ -234,17 +237,19 @@ Visit the [Releases](https://github.com/wujianqi/qi-toolbox/releases) page.
 
 - [Rust](https://www.rust-lang.org/tools/install) (2021 edition)
 
+> On Windows just run `cargo build --release`; on Linux the X11 runtime is required (Wayland sessions run through XWayland), while building needs no system -dev packages at all (windowing/protocols are pure Rust). Linux is less battle-tested — feedback welcome.
+
 #### Build
 
 ```bash
 # Debug
 cargo build
 
-# Release (optimized)
+# Release (size-optimized: opt-level=z + fat LTO + strip)
 cargo build --release
 ```
 
-The binary is at `target/release/qi-toolbox.exe`.
+The binary is at `target/release/qi-toolbox.exe` (Windows) / `target/release/qi-toolbox` (Linux).
 
 ### License
 

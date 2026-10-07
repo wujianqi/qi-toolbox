@@ -912,6 +912,9 @@ pub fn TOTP_KEYS_LABEL() -> String {
 pub fn TOTP_KEYS_NONE() -> String {
     text("totp.keys_none")
 }
+pub fn TOTP_KEY_PICK() -> String {
+    text("totp.key_pick")
+}
 pub fn TOTP_KEY_DEL() -> String {
     text("totp.key_del")
 }
@@ -944,6 +947,15 @@ pub fn TOTP_IMPORT_NO_SECRET() -> String {
 }
 pub fn TOTP_COPIED() -> String {
     text("totp.copied")
+}
+pub fn TOTP_REFRESH_IN(secs: impl Into<ArgValue>) -> String {
+    cat().format(&msg("totp.refresh_in").push(secs))
+}
+pub fn TOTP_KEY_INVALID() -> String {
+    text("totp.key_invalid")
+}
+pub fn TOTP_LIVE_HINT() -> String {
+    text("totp.live_hint")
 }
 pub fn TOTP_AUTO_COPY_LABEL() -> String {
     text("totp.auto_copy_label")
