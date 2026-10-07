@@ -56,15 +56,17 @@ ureq = { version = "2", default-features = false, features = ["tls"] }
 rustls = { version = "0.23", default-features = false, features = ["std", "ring", "tls12"] }
 rustls-pki-types = "1"
 webpki-roots = "1"
-rfd = "0.14"
+# rfd 0.17 全仓唯一版本（windui 亦依赖 0.17）：出现 0.14 + 0.17 两个同名
+# crate 会在 Linux 上报 E0464 multiple candidates for rmeta。
+# 必须关 default（内含 wayland feature 会经 wayland-backend/client_system 拉进
+# wayland-sys，编译期就要 pkg-config 找系统 libwayland）；Windows 后端无需 feature。
+rfd = { version = "0.17", default-features = false }
 png = "0.18"
 mysql_async = "0.37.1"
 tokio-postgres = "0.7.18"
 
 [target.'cfg(unix)'.dependencies]
-# CI/Linux 编译需要：rfd 0.17（windui 传递依赖）在非 Windows 平台必须二选一后端。
-# 必须关 default（内含 wayland feature 会经 wayland-backend/client_system 拉进
-# wayland-sys，编译期就要 pkg-config 找系统 libwayland）；xdg-portal 是运行时 D-Bus 门户。
+# Linux 文件对话框走 D-Bus xdg-portal（运行时门户，无门户时 rfd 回退 zenity）
 rfd = { version = "0.17", default-features = false, features = ["xdg-portal"] }
 
 [target.'cfg(windows)'.dependencies]

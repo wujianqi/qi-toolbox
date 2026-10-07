@@ -207,6 +207,13 @@ fn store_unlock_bin(key: &[u8; 32]) -> Result<(), String> {
     std::fs::write(unlock_file(), wrapped).map_err(|e| e.to_string())
 }
 
+/// 非 Windows：无 DPAPI 等价的按用户密封机制，本机解锁器停用——
+/// 每次启动走口令弹窗（明文落盘会架空主口令，宁缺毋滥）
+#[cfg(not(windows))]
+fn store_unlock_bin(_key: &[u8; 32]) -> Result<(), String> {
+    Ok(())
+}
+
 /// 尝试静默解锁：本机解锁器可解包且校验值匹配 → 免输口令返回 true
 #[cfg(windows)]
 pub fn try_silent_unlock() -> bool {
