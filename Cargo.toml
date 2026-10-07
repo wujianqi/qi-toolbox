@@ -56,5 +56,9 @@ png = "0.18"
 mysql_async = "0.37.1"
 tokio-postgres = "0.7.18"
 
+[target.'cfg(unix)'.dependencies]
+# CI/Linux 编译需要：rfd 0.17（windui 传递依赖）在非 Windows 平台必须二选一后端
+rfd = { version = "0.17", features = ["xdg-portal"] }
+
 [target.'cfg(windows)'.dependencies]
 windows-sys = { version = "0.52", features = ["Win32_Foundation", "Win32_Globalization", "Win32_Security_Cryptography", "Win32_System_Console", "Win32_System_Registry", "Win32_UI_WindowsAndMessaging"] }

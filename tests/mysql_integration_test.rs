@@ -277,3 +277,8 @@ fn parse_mysql_url(url: &str) -> Option<MySqlSource> {
         pass: pass.into(),
     })
 }
+
+#[test]
+fn integration_smoke() {
+    main();
+}

@@ -223,3 +223,8 @@ fn main() {
     qi_toolbox::core::pg::invalidate();
     println!("\n=== PG 集成验证全部通过 ===");
 }
+
+#[test]
+fn integration_smoke() {
+    main();
+}

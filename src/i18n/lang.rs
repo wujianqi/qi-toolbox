@@ -1404,49 +1404,6 @@ pub fn MENU_SELECT_ALL() -> String {
     text("menu.select_all")
 }
 
-#[cfg(test)]
-mod tests {
-    use super::{EN, ZH_CN};
-    use windui::i18n::lint;
-
-    /// 两份译文必须可解析且互相一致：key 集合一致、占位符一致、变体齐全。
-    /// TOML 写坏（语法错误、漏 key、占位符名字对不上）在这里当场报出，
-    /// 而不是上线后界面冒出原文/空串。
-    #[test]
-    fn locale_files_parse_and_match() {
-        let problems = lint::check(&[ZH_CN, EN]);
-        assert!(
-            problems.is_empty(),
-            "i18n 译文存在不一致：\n{}",
-            problems.join("\n")
-        );
-    }
-
-    /// 用与 `install()` 相同的方式构建目录：每种语言的关键 key 应能取到非原文回退的译文。
-    #[test]
-    fn locales_build_and_resolve() {
-        let locales = windui::i18n::Locales::builder()
-            .embed(ZH_CN)
-            .embed(EN)
-            .build();
-        // 语言 id 均来自各文件 [meta] locale
-        let ids: Vec<String> = locales.available().into_iter().map(|l| l.id).collect();
-        assert!(ids.contains(&"zh-CN".to_string()), "缺 zh-CN：{ids:?}");
-        assert!(ids.contains(&"en".to_string()), "缺 en：{ids:?}");
-
-        // zh-CN 缺的 key 回退到 en（meta.fallback = "en"）；双方都有则各自成文
-        let zh = locales.catalog("zh-CN");
-        assert_eq!(zh.text("app.name"), "奇兔宝");
-        assert_eq!(zh.text("tab.about"), "关于软件");
-        let en = locales.catalog("en");
-        assert_eq!(en.text("app.name"), "Qi Toolbox");
-        assert!(
-            !en.text("tab.about").contains("tab.about"),
-            "miss 时 key 原样返回"
-        );
-    }
-}
-
 // ────────────────────── 运维备忘页 ──────────────────────
 pub fn MEMO_TAB() -> String {
     text("memo.tab")
@@ -1498,4 +1455,47 @@ pub fn MEMO_EDIT_TITLE() -> String {
 }
 pub fn MEMO_NEW_TITLE() -> String {
     text("memo.new_title")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{EN, ZH_CN};
+    use windui::i18n::lint;
+
+    /// 两份译文必须可解析且互相一致：key 集合一致、占位符一致、变体齐全。
+    /// TOML 写坏（语法错误、漏 key、占位符名字对不上）在这里当场报出，
+    /// 而不是上线后界面冒出原文/空串。
+    #[test]
+    fn locale_files_parse_and_match() {
+        let problems = lint::check(&[ZH_CN, EN]);
+        assert!(
+            problems.is_empty(),
+            "i18n 译文存在不一致：\n{}",
+            problems.join("\n")
+        );
+    }
+
+    /// 用与 `install()` 相同的方式构建目录：每种语言的关键 key 应能取到非原文回退的译文。
+    #[test]
+    fn locales_build_and_resolve() {
+        let locales = windui::i18n::Locales::builder()
+            .embed(ZH_CN)
+            .embed(EN)
+            .build();
+        // 语言 id 均来自各文件 [meta] locale
+        let ids: Vec<String> = locales.available().into_iter().map(|l| l.id).collect();
+        assert!(ids.contains(&"zh-CN".to_string()), "缺 zh-CN：{ids:?}");
+        assert!(ids.contains(&"en".to_string()), "缺 en：{ids:?}");
+
+        // zh-CN 缺的 key 回退到 en（meta.fallback = "en"）；双方都有则各自成文
+        let zh = locales.catalog("zh-CN");
+        assert_eq!(zh.text("app.name"), "奇兔宝");
+        assert_eq!(zh.text("tab.about"), "关于软件");
+        let en = locales.catalog("en");
+        assert_eq!(en.text("app.name"), "Qi Toolbox");
+        assert!(
+            !en.text("tab.about").contains("tab.about"),
+            "miss 时 key 原样返回"
+        );
+    }
 }
