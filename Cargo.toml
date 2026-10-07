@@ -29,7 +29,8 @@ OriginalFilename = "qi-toolbox.exe"
 default = []
 
 [dependencies]
-windui = "0.20"
+# Linux 支持（X11/Wayland 后端）尚未发版，暂用 main 分支；0.21+ 发布后切回 crates.io
+windui = { git = "https://github.com/huanfeng/wind-ui-rust" }
 bcrypt = "0.15"
 argon2 = "0.5"
 pbkdf2 = { version = "0.12", features = ["hmac"] }
