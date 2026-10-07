@@ -25,3 +25,35 @@ jobs:
         uses: softprops/action-gh-release@v2
         with:
           files: qi-toolbox-*-windows-x64.exe
+
+  build-linux:
+    name: 发布构建（Linux x64）
+    runs-on: ubuntu-latest
+    # 固定 ubuntu 22.04 容器构建：产物动态链接 glibc 2.35，可在 22.04+/Debian 12+
+    # /RHEL 9+ 等主流发行版直接运行（用 ubuntu-latest 的 24.04 构建会把门槛抬到
+    # glibc 2.39，老发行版用户直接 GLIBC_2.38 not found）。
+    # windui Linux 后端为纯 Rust（x11rb/wayland-client），文字栈运行期 dlopen
+    # fontconfig，编译期不需要任何系统 -dev 包，仅 cc/rustup 等基础工具链。
+    container:
+      image: ubuntu:22.04
+    steps:
+      - name: 安装基础工具
+        run: |
+          apt-get update
+          apt-get install -y --no-install-recommends git ca-certificates curl build-essential
+          git config --global --add safe.directory "$GITHUB_WORKSPACE"
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo build --release
+      - name: 收集产物
+        run: |
+          ver="${{ github.ref_name }}"
+          mkdir -p pkg
+          cp target/release/qi-toolbox pkg/qi-toolbox
+          chmod +x pkg/qi-toolbox
+          tar -czf "qi-toolbox-$ver-linux-x64.tar.gz" -C pkg qi-toolbox
+      - name: 上传到 Release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: qi-toolbox-*-linux-x64.tar.gz
