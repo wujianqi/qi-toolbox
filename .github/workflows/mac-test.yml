@@ -1,0 +1,44 @@
+name: macOS 编译试验
+
+# 试验性工作流：验证 macOS 能否编译出可用产物（Apple Silicon + Intel）。
+# 产物只上传 artifact、不进 Release；验证通过后再把 macOS job 并入 release.yml。
+# 触发：推送到 test/mac-build 分支，或手动 workflow_dispatch。
+on:
+  push:
+    branches: [test/mac-build]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+  CARGO_INCREMENTAL: 0
+
+jobs:
+  build:
+    name: 编译（${{ matrix.target }}）
+    runs-on: macos-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        # macos-latest 是 arm64 机器：aarch64 为本机编译，x86_64 走同机交叉编译
+        #（Apple SDK 双架构通用，无需 osxcross）。
+        target: [aarch64-apple-darwin, x86_64-apple-darwin]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: ${{ matrix.target }}
+      - run: cargo build --release --target ${{ matrix.target }}
+      - name: 收集产物
+        run: |
+          ver="${GITHUB_SHA::7}"
+          cp "target/${{ matrix.target }}/release/qi-toolbox" "qi-toolbox-mac-test-$ver-${{ matrix.target }}"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: qi-toolbox-mac-${{ matrix.target }}
+          path: qi-toolbox-mac-test-*
