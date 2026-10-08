@@ -103,6 +103,8 @@
 
 - `qi-toolbox-<版本>-windows-x64.exe` — 单包双语言：启动跟随系统语言（中文系统→中文，否则英文），可在主面板侧栏底部「中 / EN」手动切换
 - `qi-toolbox-<版本>-linux-x64.tar.gz` — Linux (x86_64) 单文件版，解压后 `chmod +x qi-toolbox` 直接运行；基于 glibc 2.35 构建（Ubuntu 22.04+ / Debian 12+ / RHEL 9+ 等），图形走 X11 或 XWayland，文件对话框依赖 xdg-desktop-portal，字体渲染运行期探测 fontconfig（缺失时回退扫描字体目录）
+- `qi-toolbox-<版本>-macos-arm64.tar.gz` — macOS (Apple Silicon，macOS 11+) 单文件版，解压后 `chmod +x qi-toolbox` 直接运行；ad-hoc 签名，浏览器下载的首次打开若被 Gatekeeper 拦截，右键 →「打开」一次即可
+- `qi-toolbox-<版本>-macos-x64.tar.gz` — macOS (Intel，macOS 10.13+) 单文件版，使用方式同上；macOS 未经充分测试，欢迎反馈问题
 
 ### 从源码编译
 
@@ -112,6 +114,7 @@
 
 > Windows 直接 `cargo build --release`；Linux 需要 X11 运行库（Wayland 会话经 XWayland 运行），
 > 编译本身无需任何系统 -dev 包（窗口/协议实现为纯 Rust）。Linux 未经充分测试，欢迎反馈问题。
+> macOS 在 Mac 上 `cargo build --release` 即可（Metal 渲染，无需额外依赖）。
 
 #### 编译
 
@@ -123,7 +126,7 @@ cargo build
 cargo build --release
 ```
 
-产物位于 `target/release/qi-toolbox.exe`（Windows）/ `target/release/qi-toolbox`（Linux）。
+产物位于 `target/release/qi-toolbox.exe`（Windows）/ `target/release/qi-toolbox`（Linux / macOS）。
 
 ### 许可证
 
@@ -230,6 +233,8 @@ Visit the [Releases](https://github.com/wujianqi/qi-toolbox/releases) page.
 
 - `qi-toolbox-<ver>-windows-x64.exe` — Single package with built-in zh/en: follows the system language on startup (Chinese system → Chinese, otherwise English), switchable via the 中/EN toggle at the sidebar bottom
 - `qi-toolbox-<ver>-linux-x64.tar.gz` — Linux (x86_64) single-file build: extract, `chmod +x qi-toolbox` and run; built against glibc 2.35 (Ubuntu 22.04+ / Debian 12+ / RHEL 9+, etc.), renders via X11 or XWayland, file dialogs need xdg-desktop-portal, fonts probed via fontconfig at runtime (falls back to scanning font directories)
+- `qi-toolbox-<ver>-macos-arm64.tar.gz` — macOS (Apple Silicon, macOS 11+) single-file build: extract, `chmod +x qi-toolbox` and run; ad-hoc signed — if Gatekeeper blocks the first launch of a browser download, right-click → Open once
+- `qi-toolbox-<ver>-macos-x64.tar.gz` — macOS (Intel, macOS 10.13+) single-file build, same usage; macOS is not extensively tested yet, feedback welcome
 
 ### Build from Source
 

@@ -57,3 +57,41 @@ jobs:
         uses: softprops/action-gh-release@v2
         with:
           files: qi-toolbox-*-linux-x64.tar.gz
+
+  build-macos:
+    name: 发布构建（macOS ${{ matrix.pkg }}）
+    runs-on: macos-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          # macos-latest 是 arm64 机器：aarch64 为本机编译，x86_64 走同机交叉编译
+          #（Apple SDK 双架构通用，无需 osxcross）。
+          - target: aarch64-apple-darwin
+            pkg: arm64
+          - target: x86_64-apple-darwin
+            pkg: x64
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: ${{ matrix.target }}
+      - run: cargo build --release --target ${{ matrix.target }}
+      - name: 收集产物
+        run: |
+          ver="${{ github.ref_name }}"
+          mkdir -p pkg
+          cp "target/${{ matrix.target }}/release/qi-toolbox" pkg/qi-toolbox
+          chmod +x pkg/qi-toolbox
+          # ad-hoc 签名：完全未签名的 arm64 二进制在 Apple Silicon 上直接拒跑
+          #（Killed: 9）。ad-hoc 不是公证，浏览器下载仍带 quarantine 隔离标记，
+          # README 已写明首次打开右键 →「打开」。
+          codesign --force --sign - pkg/qi-toolbox
+          tar -czf "qi-toolbox-$ver-macos-${{ matrix.pkg }}.tar.gz" -C pkg qi-toolbox
+      - name: 上传到 Release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: qi-toolbox-*-macos-*.tar.gz

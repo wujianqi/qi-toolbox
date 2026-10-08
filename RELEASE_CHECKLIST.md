@@ -23,6 +23,8 @@
 - [ ] `cargo check` 无警告
 - [ ] `cargo test` 全部通过
 - [ ] `cargo build --release` 成功，产物可正常启动
+- [ ] （可选）macOS 真机冒烟：CI 只验证编译 + ad-hoc 签名，窗口/渲染/托盘等
+      运行期行为需在 Mac 上确认（下载 CI artifact 或上一版发布包）
 - [ ] 资源管理器中确认 exe 文件图标为品牌 logo（`src/logo.ico` 自动嵌入）；
       若改过 `src/logo.svg`，先跑 `cargo run --example gen-icon` 重新生成
 - [ ] 手工冒烟：TOTP 生成/备份导入导出、三数据库页连接+SQL+导出、SFTP 连接/书签、远程检测+报告导出、中英切换、深浅主题
@@ -31,5 +33,6 @@
 
 - [ ] 提交信息用 Conventional Commits（`feat:` / `fix:` / `docs:` …）
 - [ ] 打 tag：`git tag vX.Y.Z`（与 Cargo.toml 版本一致）
-- [ ] GitHub Release：上传 `qi-toolbox.exe`，Release Notes 按模板填写
-      （新增 / 改进 / 修复 / 校验和，双语）
+- [ ] GitHub Release：确认 CI 自动上传了四个产物（release.yml：windows-x64.exe /
+      linux-x64.tar.gz / macos-arm64.tar.gz / macos-x64.tar.gz），Release Notes
+      按模板填写（新增 / 改进 / 修复 / 校验和，双语）
