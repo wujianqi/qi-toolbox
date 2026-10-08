@@ -34,11 +34,17 @@ jobs:
         with:
           key: ${{ matrix.target }}
       - run: cargo build --release --target ${{ matrix.target }}
-      - name: 收集产物
+      - name: 收集产物（镜像 release.yml build-macos 的打包步骤）
         run: |
           ver="${GITHUB_SHA::7}"
-          cp "target/${{ matrix.target }}/release/qi-toolbox" "qi-toolbox-mac-test-$ver-${{ matrix.target }}"
+          mkdir -p pkg
+          cp "target/${{ matrix.target }}/release/qi-toolbox" pkg/qi-toolbox
+          chmod +x pkg/qi-toolbox
+          # ad-hoc 签名：完全未签名的 arm64 二进制在 Apple Silicon 上直接拒跑
+          codesign --force --sign - pkg/qi-toolbox
+          codesign -v pkg/qi-toolbox
+          tar -czf "qi-toolbox-mac-test-$ver-${{ matrix.target }}.tar.gz" -C pkg qi-toolbox
       - uses: actions/upload-artifact@v4
         with:
           name: qi-toolbox-mac-${{ matrix.target }}
-          path: qi-toolbox-mac-test-*
+          path: qi-toolbox-mac-test-*.tar.gz
