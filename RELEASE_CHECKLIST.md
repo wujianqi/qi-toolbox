@@ -27,7 +27,7 @@
       运行期行为需在 Mac 上确认（下载 CI artifact 或上一版发布包）
 - [ ] 资源管理器中确认 exe 文件图标为品牌 logo（`src/logo.ico` 自动嵌入）；
       若改过 `src/logo.svg`，先跑 `cargo run --example gen-icon` 重新生成
-- [ ] 手工冒烟：TOTP 生成/备份导入导出、三数据库页连接+SQL+导出、SFTP 连接/书签、远程检测+报告导出、中英切换、深浅主题
+- [ ] 手工冒烟：TOTP 生成/备份导入导出、四数据库页连接+SQL+导出（Turso / MySQL / PG / Redis）、SFTP 连接/书签、远程检测+报告导出、中英切换、深浅主题
 
 ## 4. 打标签与发布
 

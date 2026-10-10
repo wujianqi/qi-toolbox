@@ -7,9 +7,9 @@ panic = "abort"     # 减少 unwind 表
 
 [package]
 name = "qi-toolbox"
-version = "0.2.2"
+version = "0.2.3"
 edition = "2021"
-description = "奇兔宝 (Qi Toolbox) - 2FA验证码、随机密码、数据库浏览(Turso/MySQL/PG)、SFTP/SSH、S3浏览、远程检测"
+description = "奇兔宝 (Qi Toolbox) - 2FA验证码、随机密码、数据库浏览(Turso/MySQL/PG/Redis)、SFTP/SSH、S3浏览、远程检测"
 license = "MIT"
 repository = "https://github.com/wujianqi/qi-toolbox"
 
@@ -64,10 +64,23 @@ rfd = { version = "0.17", default-features = false }
 png = "0.18"
 mysql_async = "0.37.1"
 tokio-postgres = "0.7.18"
+# Redis/Valkey 客户端（RESP 协议通用）：关 default（去掉 cluster/script/连接管理等
+# 非必需模块），仅保留 tokio 异步传输；TLS 暂不支持（内网场景为主，保持轻量）
+redis = { version = "1", default-features = false, features = ["tokio-comp"] }
 
 [target.'cfg(unix)'.dependencies]
 # Linux 文件对话框走 D-Bus xdg-portal（运行时门户，无门户时 rfd 回退 zenity）
 rfd = { version = "0.17", default-features = false, features = ["xdg-portal"] }
+
+[target.'cfg(target_os = "macos")'.dependencies]
+# 主口令本机免输：密钥存 Keychain（security-framework，系统自带，无额外系统依赖）
+keyring = { version = "3", default-features = false, features = ["apple-native"] }
+
+[target.'cfg(target_os = "linux")'.dependencies]
+# 密钥存 keyutils + Secret Service（D-Bus 运行时门户，gnome-keyring/kwallet）；
+# crypto-rust 复用现有 rust-crypto 系依赖，避免 openssl 动态链接。
+# 无 D-Bus/密钥环的裸环境：keyring 报错 → 自动回退每次输口令（同旧行为）
+keyring = { version = "3", default-features = false, features = ["linux-native-sync-persistent", "crypto-rust"] }
 
 [target.'cfg(windows)'.dependencies]
 windows-sys = { version = "0.52", features = ["Win32_Foundation", "Win32_Globalization", "Win32_Security_Cryptography", "Win32_System_Console", "Win32_System_Registry", "Win32_UI_WindowsAndMessaging"] }

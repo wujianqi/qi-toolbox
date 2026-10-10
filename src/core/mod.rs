@@ -23,6 +23,7 @@ pub mod mysql;
 pub mod password;
 pub mod pg;
 pub mod qr;
+pub mod redis;
 pub mod remote;
 pub mod s3;
 pub mod settings;

@@ -34,6 +34,7 @@ fn module_name(id: usize) -> String {
         6 => lang::S3_TAB(),
         7 => lang::MYSQL_TAB(),
         8 => lang::PG_TAB(),
+        10 => lang::REDIS_TAB(),
         _ => lang::TAB_ABOUT(),
     }
 }

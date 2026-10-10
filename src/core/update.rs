@@ -15,7 +15,11 @@ pub fn check_latest() -> Result<String, String> {
         .call()
         .map_err(|e| e.to_string())?;
     let text = resp.into_string().map_err(|e| e.to_string())?;
-    // 极简解析（不引 serde）：找 "tag_name":"vX.Y.Z"
+    parse_tag_name(&text)
+}
+
+/// 极简 JSON 解析（不引 serde）：从 releases 响应中提取 `"tag_name":"vX.Y.Z"`。
+fn parse_tag_name(text: &str) -> Result<String, String> {
     let key = "\"tag_name\"";
     let pos = text
         .find(key)
@@ -65,5 +69,25 @@ mod tests {
         assert!(!is_newer("x.y.z", "0.0.1"));
         // 带空白的段容错
         assert!(is_newer("0. 3.0 ", "0.2.0"));
+    }
+
+    #[test]
+    fn tag_parse() {
+        // GitHub releases API 实际形态
+        assert_eq!(
+            parse_tag_name(r#"{"tag_name":"v0.3.0","name":"x"}"#).unwrap(),
+            "0.3.0"
+        );
+        // 无 v 前缀
+        assert_eq!(parse_tag_name(r#"{"tag_name": "1.2.3"}"#).unwrap(), "1.2.3");
+        // 字段在 JSON 中间
+        assert_eq!(
+            parse_tag_name(r#"{"url":"…","tag_name":"v10.0.1","x":1}"#).unwrap(),
+            "10.0.1"
+        );
+        // 缺字段 / 非法 JSON
+        assert!(parse_tag_name("{}").is_err());
+        assert!(parse_tag_name("not json").is_err());
+        assert!(parse_tag_name(r#"{"tag_name":}"#).is_err());
     }
 }

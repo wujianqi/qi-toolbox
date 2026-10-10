@@ -5,7 +5,7 @@ use windui::prelude::*;
 
 use super::nav;
 use super::shell::set_window_title;
-use super::{icons, memo, mysql, password, pg, remote, s3, sftp, totp, turso, AppState};
+use super::{icons, memo, mysql, password, pg, redis, remote, s3, sftp, totp, turso, AppState};
 use crate::lang;
 
 // ══════════════════════════════════════════════════════════════════
@@ -29,7 +29,7 @@ pub(super) fn build_ui(state: &AppState, th: ThemeHandle) -> Element {
 
     // ── 左侧栏：品牌区 + 可拖拽排序的导航（2FA / 密码 / Turso / SFTP/SSH / 远程 / 关于）──
     // 模块定义：数组下标即模块 id，内容页按 id 显隐；拖拽只调侧栏顺序、不改 id。
-    let nav_items: [(String, &[u8]); 10] = [
+    let nav_items: [(String, &[u8]); 11] = [
         (lang::TAB_2FA(), icons::ZAP),
         (lang::TAB_PASSWORD(), icons::LOCK),
         (lang::TAB_TURSO(), icons::SQLITE),
@@ -40,6 +40,7 @@ pub(super) fn build_ui(state: &AppState, th: ThemeHandle) -> Element {
         (lang::MYSQL_TAB(), icons::MYSQL),
         (lang::PG_TAB(), icons::POSTGRESQL),
         (lang::MEMO_TAB(), icons::NOTE),
+        (lang::REDIS_TAB(), icons::REDIS),
     ];
     // 数据驱动重排：顺序真值源 = nav_order 信号（拖拽后应用自行改信号 → 整列重建，
     // 反向同步天然成立，恢复默认/重新载入配置都只需要 set 信号）
@@ -158,6 +159,7 @@ pub(super) fn build_ui(state: &AppState, th: ThemeHandle) -> Element {
     // MySQL/PG 库址管理+列选择弹窗挂根层级：ModalScrim 遮罩铺满根节点，模态覆盖整窗（含侧栏）
     let (mysql_page, mysql_col_dialog, mysql_site_mgr) = mysql::build_mysql_tab(&state.mysql);
     let (pg_page, pg_col_dialog, pg_site_mgr) = pg::build_pg_tab(&state.pg);
+    let (redis_page, redis_site_mgr) = redis::build_redis_tab(&state.redis);
     // Turso 列设置/库源管理弹窗挂根层级：ModalScrim 遮罩铺满根节点，模态覆盖整窗（含侧栏）
     let (turso_page, turso_col_dialog, turso_db_mgr) = turso::build_turso_tab(&state.turso);
     // TOTP 备份弹窗挂根层级：ModalScrim 遮罩铺满根节点，模态覆盖整窗（含侧栏）
@@ -171,6 +173,7 @@ pub(super) fn build_ui(state: &AppState, th: ThemeHandle) -> Element {
         .child(turso_page.visible_when(move || tab.get() == 2))
         .child(mysql_page.visible_when(move || tab.get() == 7))
         .child(pg_page.visible_when(move || tab.get() == 8))
+        .child(redis_page.visible_when(move || tab.get() == 10))
         .child(sftp_page.visible_when(move || tab.get() == 3))
         .child(remote_page.visible_when(move || tab.get() == 4))
         .child(s3_page.visible_when(move || tab.get() == 6))
@@ -259,6 +262,7 @@ pub(super) fn build_ui(state: &AppState, th: ThemeHandle) -> Element {
         .child(s3_dialogs)
         .child(mysql_site_mgr)
         .child(pg_site_mgr)
+        .child(redis_site_mgr)
         .child(mysql_col_dialog)
         .child(pg_col_dialog)
         .child(turso_col_dialog)
@@ -266,6 +270,23 @@ pub(super) fn build_ui(state: &AppState, th: ThemeHandle) -> Element {
         .child(totp_backup_dialog);
     // 主口令门控（首次设置/换环境解锁）：主界面照常构建渲染，门控以自绘
     // 遮罩浮层叠在其上（背景界面可见不显空白，且未注册模态——窗体 ✕ 直接退出应用）
+    // 门控关闭（口令设置/解锁成功）后重载 Redis 站点：RedisUi::new 在启动期构建，
+    // 时点早于解锁，unprotect 失败会把 `v2:` 密文按旧版明文兜底原样读出（连接串
+    // 显示为密文）。其余页同理在保存/编辑时才解密，不受影响。
+    let gate_watch = {
+        let redis = state.redis.clone();
+        super::sig_watch::sig_watch(
+            move || gate_show.version(),
+            false,
+            move |_| {
+                if !gate_show.get() {
+                    redis.reload();
+                }
+            },
+        )
+        .reactive()
+    };
     main_ui
         .child(super::master::build_gate(&state.master_gate).visible_when(move || gate_show.get()))
+        .child(gate_watch)
 }

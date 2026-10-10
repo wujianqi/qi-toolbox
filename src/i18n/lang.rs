@@ -1265,6 +1265,55 @@ pub fn PG_EXPORT_DONE(path: impl Into<ArgValue>) -> String {
 pub fn PG_CONN_HINT() -> String {
     text("pg.conn_hint")
 }
+// ────────────────────── Redis 页 ──────────────────────
+pub fn REDIS_TAB() -> String {
+    text("redis.tab")
+}
+pub fn REDIS_CONN_MGR() -> String {
+    text("redis.conn_mgr")
+}
+pub fn REDIS_SITE_TITLE() -> String {
+    text("redis.site_title")
+}
+pub fn REDIS_CONN_HINT() -> String {
+    text("redis.conn_hint")
+}
+pub fn REDIS_CONNECTED(count: impl Into<ArgValue>) -> String {
+    cat().format(&msg("redis.connected").push(count))
+}
+pub fn REDIS_UNKNOWN_PANIC() -> String {
+    text("redis.unknown_panic")
+}
+pub fn REDIS_DB_LIST() -> String {
+    text("redis.db_list")
+}
+pub fn REDIS_DB_NONE() -> String {
+    text("redis.db_none")
+}
+pub fn REDIS_PREFIX_LIST() -> String {
+    text("redis.prefix_list")
+}
+pub fn REDIS_KEY_LIST(count: impl Into<ArgValue>) -> String {
+    cat().format(&msg("redis.key_list").push(count))
+}
+pub fn REDIS_NO_KEYS() -> String {
+    text("redis.no_keys")
+}
+pub fn REDIS_CMD_HINT() -> String {
+    text("redis.cmd_hint")
+}
+pub fn REDIS_CMD_PANEL() -> String {
+    text("redis.cmd_panel")
+}
+pub fn REDIS_READONLY() -> String {
+    text("redis.readonly")
+}
+pub fn REDIS_TTL_FOREVER() -> String {
+    text("redis.ttl_forever")
+}
+pub fn REDIS_TTL_NE() -> String {
+    text("redis.ttl_ne")
+}
 pub fn SQL_AFFECTED(n: impl Into<ArgValue>) -> String {
     cat().format(&msg("sql.affected").push(n))
 }

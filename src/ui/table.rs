@@ -49,24 +49,6 @@ fn cell_text_sig(i: usize, value: &str) -> Signal<String> {
     })
 }
 
-/// 列表视图单元格展示上限（字符）：超长 TEXT 在**渲染层**截断，避免 label 的
-/// `truncate` 对全串做 O(N) 文本测量拖慢虚拟列表滚动重建。
-/// 业务层存完整值（`core::turso` 不截断），详情视图读全文，不受此限。
-const CELL_DISPLAY_MAX: usize = 256;
-
-/// 列表单元格展示文本：超出 [`CELL_DISPLAY_MAX`] 时截断（借用切片，零分配；
-/// 宽度溢出仍由 label 的 `truncate` 按列收尾）。
-fn cell_display(cell: &str) -> &str {
-    match cell.char_indices().nth(CELL_DISPLAY_MAX) {
-        Some((idx, _)) => &cell[..idx],
-        None => cell,
-    }
-}
-
-/// 数据表行高：windui 的 `TABLE_ROW_H` 按纯文本行定（约 21px），装不下 26px 的
-/// 「查看」按钮，故本地抬高行高；表头/正文统一用它保证对齐（height/width 均为 i32）。
-pub const ROW_H: i32 = 32;
-
 /// 左侧表列表（list_signal 数据驱动，点击异步加载表数据）
 /// `loading`/`pending`：节流信号，连点表名时同一时间只允许一个后台加载
 pub fn render_table_list(
@@ -452,109 +434,9 @@ fn build_table_view(
         }
     }
 
-    // ── 列表视图：自建表头（单行裁切防溢出）+ 官方虚拟滚动正文 ──
-    // 官方 table_header 的 label 无 max_lines，长列标题在窄列下换行会溢出到正文（表头文字
-    // 与第一行数据重叠），故表头自建并强制单行裁切；正文用官方 `Element::virtual_list`
-    // （只构建视口内 ±overscan 的行，10 万行也恒定节点数）。
-    //
-    // 列显示由 `t.visible` 控制（列设置面板勾选）：隐藏列不构建；可见列权重按
-    // 「列名 + 前 200 行内容」最大字符数估算——长字段列宽、短字段列窄，避免列多时
-    // 全部被裁成省略号。借用只读前 200 行，不克隆整表。
-    let head_lens = rows.with(|v| {
-        let mut acc = vec![0usize; t.columns.len()];
-        for row in v.iter().take(200) {
-            for (i, s) in row.iter().take(t.columns.len()).enumerate() {
-                // 只统计展示上限内的字符：超出即视为「长列」，避免超长单元格
-                // 拖慢列宽估算
-                acc[i] = acc[i].max(s.chars().take(CELL_DISPLAY_MAX).count());
-            }
-        }
-        acc
-    });
-    let visible_idx: Vec<usize> = (0..t.columns.len())
-        .filter(|&i| t.visible.get(i).copied().unwrap_or(true))
-        .collect();
-    let weights: Vec<f32> = visible_idx
-        .iter()
-        .map(|&i| {
-            let longest = t.columns[i]
-                .chars()
-                .count()
-                .max(head_lens.get(i).copied().unwrap_or(0));
-            // 权重下限 1.0 防零宽列，上限 12 防单列霸屏
-            (1.0f32 + longest as f32 * 0.6).min(12.0)
-        })
-        .collect();
-
-    // 表头：与正文行高一致，列标题单行裁切（不换行、不溢出）
-    let mut header = Element::row()
-        .width_match()
-        .height(ROW_H)
-        .cross(Align::Center)
-        .bg_role(Role::SurfaceAlt)
-        // 左侧预留「查看」按钮列（与正文按钮同宽），保证表头与数据列对齐
-        .child(Element::leaf().width(26));
-    for (k, &i) in visible_idx.iter().enumerate() {
-        header = header.child(
-            Element::label(&t.columns[i])
-                .font_size(13.0)
-                .font_weight(600)
-                .fg_role(Role::TextMuted)
-                .max_lines(1)
-                .truncate(Truncate::End)
-                .weight(weights[k]),
-        );
-    }
-
-    // 正文：官方虚拟滚动列表，每行 = 查看按钮 + 可见列单元格（单行裁切）
-    let body = Element::virtual_list(rows, ROW_H, move |idx, row: Vec<String>| {
-        let mut r = Element::row()
-            .width_match()
-            .height(ROW_H)
-            .cross(Align::Center);
-        // 斑马纹区分行；行内按钮自带 hover 反馈，避免整行 clickable 的补间重绘
-        if idx % 2 == 1 {
-            r = r.bg_role(Role::SurfaceAlt);
-        }
-        let ri = idx;
-        // 「查看」按钮固定最左列：列多了右侧会被裁掉，放左侧始终可见
-        r = r.child(
-            Element::icon_button_content(
-                // ImageContent 非 Clone，行构建期现构造（虚拟列表仅构建可见行）
-                icons::stateful_icon(icons::SEARCH),
-            )
-            .size(26, 26)
-            .on_click(move |_| {
-                meta.update(|v| {
-                    if let Some(p) = v.first_mut() {
-                        p.selected_row = Some(ri);
-                    }
-                });
-            }),
-        );
-        for (k, &i) in visible_idx.iter().enumerate() {
-            let cell = row.get(i).map(String::as_str).unwrap_or("");
-            let is_null = cell == "NULL";
-            r = r.child(
-                Element::label(cell_display(cell))
-                    .font_size(13.0)
-                    .max_lines(1)
-                    .truncate(Truncate::End)
-                    .weight(weights[k])
-                    .fg_role(if is_null { Role::TextMuted } else { Role::Text }),
-            );
-        }
-        r
-    });
-
-    Element::col()
-        .width_match()
-        .child(header)
-        .child(
-            Element::leaf()
-                .width_match()
-                .height(1)
-                .bg_role(Role::Divider),
-        )
-        .child(body.weight(1.0))
+    // ── 列表视图：横向可滚动的自绘表格（htable）──
+    // 官方表格列宽按视口权重分配 + 单元格裁切，宽表看不全；自绘组件按内容固定列宽、
+    // 自管横向偏移（Shift+滚轮 / 底部滚动条拖动），纵向滚动仍交给外层 scroll。
+    // 列显示由 `t.visible` 控制（列设置面板勾选），隐藏列不绘制。
+    crate::ui::htable::htable(meta, rows)
 }

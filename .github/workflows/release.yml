@@ -40,7 +40,10 @@ jobs:
       - name: 安装基础工具
         run: |
           apt-get update
-          apt-get install -y --no-install-recommends git ca-certificates curl build-essential
+          # libdbus-1-dev + pkg-config：keyring(linux-native-sync-persistent) 编译期
+          # 经 libdbus-sys 探测系统 libdbus；运行期链接 libdbus-1.so.3（桌面发行版
+          # 均预装 dbus 运行库，无需用户另装）。
+          apt-get install -y --no-install-recommends git ca-certificates curl build-essential pkg-config libdbus-1-dev
           git config --global --add safe.directory "$GITHUB_WORKSPACE"
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable

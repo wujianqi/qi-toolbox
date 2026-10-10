@@ -207,11 +207,60 @@ fn store_unlock_bin(key: &[u8; 32]) -> Result<(), String> {
     std::fs::write(unlock_file(), wrapped).map_err(|e| e.to_string())
 }
 
-/// 非 Windows：无 DPAPI 等价的按用户密封机制，本机解锁器停用——
-/// 每次启动走口令弹窗（明文落盘会架空主口令，宁缺毋滥）
+/// 非 Windows：派生密钥存系统密钥环（macOS Keychain / Linux keyutils+Secret
+/// Service），等价 DPAPI 的"仅本机本用户"保护；密钥环不可用（裸 Linux 无
+/// D-Bus/密钥环等）报错 → 自动回退每次启动输口令。
 #[cfg(not(windows))]
-fn store_unlock_bin(_key: &[u8; 32]) -> Result<(), String> {
-    Ok(())
+const KEYRING_SERVICE: &str = "qi-toolbox-master";
+#[cfg(not(windows))]
+const KEYRING_USER: &str = "master-key";
+
+#[cfg(not(windows))]
+fn keyring_entry() -> Result<keyring::Entry, String> {
+    keyring::Entry::new(KEYRING_SERVICE, KEYRING_USER).map_err(|e| e.to_string())
+}
+
+#[cfg(not(windows))]
+fn store_unlock_bin(key: &[u8; 32]) -> Result<(), String> {
+    // base64ct 编码为可打印串（密钥环要求 UTF-8），解码失败即弃用走口令弹窗
+    let b64 = Base64::encode_string(key);
+    keyring_entry()?.set_password(&b64)
+}
+
+/// 尝试静默解锁：密钥环中存有派生密钥且校验值匹配 → 免输口令返回 true
+#[cfg(not(windows))]
+pub fn try_silent_unlock() -> bool {
+    if !is_set() || unlocked() {
+        return unlocked();
+    }
+    let Ok(b64) = keyring_entry().and_then(|e| e.get_password()) else {
+        return false;
+    };
+    let Ok(key_b32) = Base64::decode_vec(b64.trim())
+        .and_then(|b| <[u8; 32]>::try_from(b.as_slice()).map_err(|_| ()))
+    else {
+        // 密钥环内容损坏：清除后走口令弹窗
+        if let Ok(e) = keyring_entry() {
+            let _ = e.delete_credential();
+        }
+        return false;
+    };
+    // 校验：密钥必须能解开校验值（防密钥环残留与库不配套，如恢复过旧备份）
+    let verifier = match crate::core::store::master_cred_get() {
+        Ok(Some((_, v))) => v,
+        _ => return false,
+    };
+    if open(&key_b32, &verifier).is_err() {
+        // 与当前库不配套：丢弃，走口令弹窗
+        if let Ok(e) = keyring_entry() {
+            let _ = e.delete_credential();
+        }
+        return false;
+    }
+    if let Ok(mut g) = KEY.lock() {
+        *g = Some(key_b32);
+    }
+    true
 }
 
 /// 尝试静默解锁：本机解锁器可解包且校验值匹配 → 免输口令返回 true
@@ -243,12 +292,6 @@ pub fn try_silent_unlock() -> bool {
         *g = Some(key_b32);
     }
     true
-}
-
-/// 非 Windows：无静默解锁（每次启动输口令）
-#[cfg(not(windows))]
-pub fn try_silent_unlock() -> bool {
-    unlocked()
 }
 
 /// 取当前派生密钥（未解锁返回 Err）

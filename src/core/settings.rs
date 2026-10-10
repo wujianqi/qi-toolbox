@@ -11,25 +11,36 @@ use std::path::PathBuf;
 
 use base64ct::{Base64, Encoding};
 
-/// 配置目录（store 初始化时自动创建）。Windows 走 APPDATA；其它平台预留
-/// XDG_CONFIG_HOME / ~/.config，供未来跨平台版本使用。
+/// 配置目录（store 初始化时自动创建）。按平台约定：
+/// Windows 走 `%APPDATA%`；macOS 走 `~/Library/Application Support`（Apple 约定，
+/// XDG_CONFIG_HOME 可覆盖以便开发调试）；Linux/其它走 XDG_CONFIG_HOME / ~/.config。
+/// 基础目录全部解析失败时退回可写临时目录，绝不落到相对路径。
 pub fn config_dir() -> PathBuf {
-    let base = if cfg!(windows) {
-        std::env::var_os("APPDATA")
+    base_dir().join("qi-toolbox")
+}
+
+/// 平台基础配置目录（不含应用名），解析失败退回临时目录。
+fn base_dir() -> PathBuf {
+    let from_env = |var: &str| {
+        std::env::var_os(var)
             .map(PathBuf::from)
-            .unwrap_or_else(|| {
-                // APPDATA 缺失（极少见）：退回用户主目录下的 Roaming
-                std::env::var_os("USERPROFILE")
-                    .map(|p| PathBuf::from(p).join("AppData").join("Roaming"))
-                    .unwrap_or_default()
-            })
-    } else {
-        std::env::var_os("XDG_CONFIG_HOME")
-            .map(PathBuf::from)
-            .or_else(|| std::env::var_os("HOME").map(|h| PathBuf::from(h).join(".config")))
-            .unwrap_or_default()
+            .filter(|p| !p.as_os_str().is_empty())
     };
-    base.join("qi-toolbox")
+    let base = if cfg!(windows) {
+        from_env("APPDATA").or_else(|| {
+            // APPDATA 缺失（极少见）：退回用户主目录下的 Roaming
+            std::env::var_os("USERPROFILE")
+                .map(|p| PathBuf::from(p).join("AppData").join("Roaming"))
+        })
+    } else if cfg!(target_os = "macos") {
+        // Apple 约定路径：~/Library/Application Support（不用 XDG，保持平台一致）
+        std::env::var_os("HOME")
+            .map(|h| PathBuf::from(h).join("Library").join("Application Support"))
+    } else {
+        from_env("XDG_CONFIG_HOME")
+            .or_else(|| std::env::var_os("HOME").map(|h| PathBuf::from(h).join(".config")))
+    };
+    base.unwrap_or_else(std::env::temp_dir)
 }
 
 /// 敏感键注册表：命中者写入时走加密后端（不落明文）。
@@ -189,5 +200,37 @@ mod tests {
         assert!(!is_secret_key("SFTP.PASS"));
         assert!(!is_secret_key("sftp.password"));
         assert!(!is_secret_key(""));
+    }
+
+    /// config_dir 按平台约定拼接：Windows %APPDATA% / macOS Library /
+    /// Linux XDG~/.config,且永远返回绝对路径（基础目录缺失退回临时目录）
+    #[test]
+    fn config_dir_platform_layout() {
+        let dir = config_dir();
+        assert!(
+            dir.is_absolute(),
+            "config_dir 应为绝对路径: {}",
+            dir.display()
+        );
+        let last = dir.file_name().and_then(|s| s.to_str()).unwrap_or("");
+        assert_eq!(last, "qi-toolbox");
+        if cfg!(windows) {
+            let win = dir.to_string_lossy().to_lowercase();
+            assert!(
+                win.contains("appdata") || win.contains("\\temp\\"),
+                "{}",
+                win
+            );
+        } else if cfg!(target_os = "macos") {
+            let mac = dir.to_string_lossy();
+            assert!(
+                mac.contains("Library/Application Support") || mac.contains("/tmp/"),
+                "{}",
+                mac
+            );
+        } else {
+            let nix = dir.to_string_lossy();
+            assert!(nix.contains(".config") || nix.contains("/tmp/"), "{}", nix);
+        }
     }
 }

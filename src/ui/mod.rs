@@ -23,6 +23,7 @@ use layout::build_ui;
 use shell::{app_icon, set_window_title, system_light_theme};
 
 mod db_page;
+mod htable;
 mod icons;
 mod layout;
 pub(crate) mod master;
@@ -32,6 +33,7 @@ mod mysql;
 mod nav;
 mod password;
 mod pg;
+mod redis;
 mod remote;
 mod s3;
 mod sftp;
@@ -140,6 +142,7 @@ struct AppState {
     turso: turso::TursoUi,
     mysql: mysql::MySqlUi,
     pg: pg::PgUi,
+    redis: redis::RedisUi,
     sftp: sftp::SftpUi,
     s3: s3::S3Ui,
     memo: memo::MemoUi,
@@ -155,7 +158,7 @@ impl AppState {
         let master_gate = master::MasterGate::init();
         let s = Self {
             tab: signal(0usize),
-            nav_order: signal(vec![3, 6, 2, 7, 8, 0, 1, 4, 9, 5]),
+            nav_order: signal(vec![3, 6, 2, 7, 8, 10, 0, 1, 4, 9, 5]),
             sidebar_visible: signal(true),
             theme_mode: signal(if system_light_theme() { 0 } else { 1 }),
             theme_epoch: signal(vec![()]),
@@ -165,6 +168,7 @@ impl AppState {
             turso: turso::TursoUi::new(),
             mysql: mysql::MySqlUi::new(),
             pg: pg::PgUi::new(),
+            redis: redis::RedisUi::new(),
             sftp: sftp::SftpUi::new(),
             s3: s3::S3Ui::new(),
             memo: memo::MemoUi::new(),
@@ -179,10 +183,10 @@ impl AppState {
             let ids: Vec<usize> = v
                 .split(',')
                 .filter_map(|p| p.trim().parse::<usize>().ok())
-                .filter(|&i| i < 10)
+                .filter(|&i| i < 11)
                 .collect();
-            let mut seen = [false; 10];
-            let ok = ids.len() == 10
+            let mut seen = [false; 11];
+            let ok = ids.len() == 11
                 && ids.iter().all(|&i| {
                     if seen[i] {
                         false
@@ -191,9 +195,12 @@ impl AppState {
                         true
                     }
                 });
-            // 旧默认顺序（备忘在密码之后）视为未定制，迁移到新默认（备忘倒数第二）；
+            // 旧默认顺序（10 项、无 Redis）视为未定制，迁移到新默认（Redis 在 MySQL/PG 之后）；
             // 其余用户拖拽顺序原样保留。
-            if ok && ids != [0, 1, 2, 3, 4, 5, 6, 7, 8, 9] {
+            if ok
+                && ids != [3, 6, 2, 7, 8, 0, 1, 4, 9, 5]
+                && ids != [3, 6, 2, 7, 8, 10, 0, 1, 4, 9, 5]
+            {
                 s.nav_order.set(ids);
             }
         }
@@ -332,6 +339,12 @@ pub fn run() {
     state.turso.set_tx(tx_turso);
     state.mysql.set_tx(tx_mysql);
     state.pg.set_tx(tx_pg);
+    // ── Redis 页后台通道 ──
+    let chan_r = state.clone();
+    let tx_redis = app.channel::<redis::RedisMsg>(move |_ctx, msg| {
+        chan_r.redis.on_msg(msg);
+    });
+    state.redis.set_tx(tx_redis);
 
     // ── SFTP 后台工作线程：SSH/SFTP 会话跨命令存活，结果经通道回 UI 线程 ──
     let chan2 = state.clone();

@@ -554,3 +554,92 @@ pub fn sftp_bmk_del(path: &str) -> Result<(), String> {
         })
     }))
 }
+
+/// Redis 连接配置（多站点管理；连接串含密码，加密存 url_enc）
+#[derive(Debug, Clone)]
+pub struct RedisSite {
+    pub id: i64,
+    pub name: String,
+    pub url: String,
+}
+
+fn row_to_redis_site(row: &turso::Row) -> Result<RedisSite, String> {
+    let id: i64 = row.get(0).map_err(|e| e.to_string())?;
+    let enc = value_to_string(row, 2);
+    let url = if enc.is_empty() {
+        String::new()
+    } else {
+        match unprotect(&enc) {
+            Ok(u) => u,
+            // 旧版明文连接串：原样返回（下次保存时自动升级为密文）
+            Err(_) => enc,
+        }
+    };
+    Ok(RedisSite {
+        id,
+        name: value_to_string(row, 1),
+        url,
+    })
+}
+
+/// 列出全部 Redis 站点（按名称排序；连接串已解密）
+pub fn redis_site_list() -> Result<Vec<RedisSite>, String> {
+    run(Box::new(|conn: turso::Connection| {
+        Box::pin(async move {
+            let mut out = Vec::new();
+            let mut rows = conn
+                .query(
+                    "SELECT id, name, url_enc FROM redis_sites ORDER BY name",
+                    (),
+                )
+                .await
+                .map_err(|e| e.to_string())?;
+            while let Some(row) = rows.next().await.map_err(|e| e.to_string())? {
+                out.push(row_to_redis_site(&row)?);
+            }
+            Ok(out)
+        })
+    }))
+}
+
+/// 新增 / 更新 Redis 站点（id=0 新增；连接串加密存 url_enc，旧明文自动升级）
+pub fn redis_site_upsert(site: &RedisSite) -> Result<(), String> {
+    let enc = if site.url.is_empty() {
+        String::new()
+    } else {
+        protect(&site.url)?
+    };
+    let (name, id) = (site.name.clone(), site.id);
+    run(Box::new(move |conn: turso::Connection| {
+        Box::pin(async move {
+            if id <= 0 {
+                conn.execute(
+                    "INSERT INTO redis_sites(name, url_enc) VALUES(?1,?2)",
+                    (name.as_str(), enc.as_str()),
+                )
+                .await
+                .map_err(|e| e.to_string())?;
+            } else {
+                conn.execute(
+                    "UPDATE redis_sites SET name=?1, url_enc=?2 WHERE id=?3",
+                    (name.as_str(), enc.as_str(), id),
+                )
+                .await
+                .map_err(|e| e.to_string())?;
+            }
+            Ok(())
+        })
+    }))
+}
+
+/// 删除 Redis 站点
+pub fn redis_site_del(id: i64) -> Result<(), String> {
+    run(Box::new(move |conn: turso::Connection| {
+        Box::pin(async move {
+            conn.execute("DELETE FROM redis_sites WHERE id = ?1", (id,))
+                .await
+                .map_err(|e| e.to_string())?;
+            Ok(())
+        })
+    }))
+}

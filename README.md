@@ -12,14 +12,14 @@
 
 ## 中文
 
-轻量级一站式服务器快捷管理工具箱，基于 Rust + windui 构建的原生 Windows / Linux 桌面应用，集 2FA 验证码生成、账号密码加密、数据库浏览（Turso / MySQL / PostgreSQL）、SFTP 文件管理、S3 对象存储浏览、运维备忘、远程检测（连接 / Ping / SSL 证书 / 响应体 / SEO 分析 / 安全检测）于一体。
+轻量级一站式服务器快捷管理工具箱，基于 Rust + windui 构建的原生 Windows / Linux 桌面应用，集 2FA 验证码生成、账号密码加密、数据库浏览（Turso / MySQL / PostgreSQL / Redis）、SFTP 文件管理、S3 对象存储浏览、运维备忘、远程检测（连接 / Ping / SSL 证书 / 响应体 / SEO 分析 / 安全检测）于一体。
 
 ### ✨ 亮点
 
 - **一个 exe 走天下**：整个软件仅约 15 MB，单文件绿色版，下载即用，U 盘可携带，不写注册表、无后台进程
-- **极致轻量**：整个软件仅约 **15 MB** —— 七大功能模块装进一个文件，比很多软件的一张截图还小
+- **极致轻量**：整个软件仅约 **15 MB** —— 八大功能模块装进一个文件，比很多软件的一张截图还小
 - **原生性能**：纯 Rust 构建，原生 Windows GUI —— 秒级启动、内存占用极低、不卡 UI，彻底告别 Electron 式动辄几百 MB 的臃肿
-- **数据只属于你**：TOTP 密钥、SFTP 密码等敏感信息全部本地加密存储（Windows DPAPI）
+- **数据只属于你**：TOTP 密钥、SFTP 密码等敏感信息全部本地加密存储（Windows DPAPI / macOS Keychain / Linux 密钥环）
 - **从密码到上线的完整链路**：生成密码 → 哈希加密 → 生成 SQL → SFTP 部署 → 远程检测，一个工具贯穿全流程
 - **安全体检一体化**：SSL 证书 / 安全响应头 / 敏感路径 / 风险端口 / TLS 旧版本，一键扫描
 - **中英双语随行**：跟随系统语言启动，应用内一键切换
@@ -36,6 +36,14 @@
 - 数据导出 CSV，整库结构导出 DDL（schema.sql），行详情查看模式
 - SQL 只读模式：一键拦截写语句，浏览数据更安心
 - 查询管理：常用 SQL 保存 / 复用 / 删除
+
+#### Redis 浏览
+
+- 连接 Redis / Valkey 服务器（RESP 协议通用），多连接管理：保存常用连接，快速切换
+- 数据库（db0..dbN）切换浏览，SCAN 分页浏览键列表（不阻塞服务，不 KEEPS 全量键）
+- 键详情：类型 / TTL / 值自动按类型展开（STRING 直读，LIST / SET / ZSET / HASH 摘要预览，大值 64 KB 截断）
+- 内置命令行：任意 Redis 命令执行，结果表格化展示（支持引号含空格的参数）
+- 连接串密码加密存储，展示时自动隐藏
 
 #### S3 对象存储浏览
 
@@ -113,7 +121,8 @@
 - [Rust](https://www.rust-lang.org/tools/install) (2021 edition)
 
 > Windows 直接 `cargo build --release`；Linux 需要 X11 运行库（Wayland 会话经 XWayland 运行），
-> 编译本身无需任何系统 -dev 包（窗口/协议实现为纯 Rust）。Linux 未经充分测试，欢迎反馈问题。
+> 另需 `pkg-config` + `libdbus-1-dev`（主口令免输功能经 D-Bus 访问系统密钥环，仅编译期需要
+> -dev 包；无密钥环环境运行时自动回退每次输口令）。Linux 未经充分测试，欢迎反馈问题。
 > macOS 在 Mac 上 `cargo build --release` 即可（Metal 渲染，无需额外依赖）。
 
 #### 编译
@@ -138,16 +147,16 @@ cargo build --release
 
 ## English
 
-Lightweight one-stop server management toolbox — a native Windows / Linux desktop app built with Rust + windui, combining a 2FA authenticator, password hashing, database viewers (Turso / MySQL / PostgreSQL), an SFTP file manager, an S3 object storage browser, an ops memo pad, and remote checks (connect / ping / SSL certificate / response body / SEO analysis / security scan).
+Lightweight one-stop server management toolbox — a native Windows / Linux desktop app built with Rust + windui, combining a 2FA authenticator, password hashing, database viewers (Turso / MySQL / PostgreSQL / Redis), an SFTP file manager, an S3 object storage browser, an ops memo pad, and remote checks (connect / ping / SSL certificate / response body / SEO analysis / security scan).
 
-> **Highlights**: the entire app is only ~15 MB — single-file portable build, zero install, no background services; pure-Rust native implementation with instant startup and minimal memory footprint; sensitive data (TOTP secrets, SFTP passwords, etc.) is stored locally with platform encryption (DPAPI on Windows); built-in zh/en bilingual UI follows the system language and can be switched in-app.
+> **Highlights**: the entire app is only ~15 MB — single-file portable build, zero install, no background services; pure-Rust native implementation with instant startup and minimal memory footprint; sensitive data (TOTP secrets, SFTP passwords, etc.) is stored locally with platform encryption (DPAPI on Windows, Keychain on macOS, secret service on Linux); built-in zh/en bilingual UI follows the system language and can be switched in-app.
 
 ### ✨ Highlights
 
 - **One exe for everything**: single-file portable build, download and run, USB-stick friendly, no registry writes, no background processes
-- **Ultra lightweight**: the entire app is only ~**15 MB** — seven feature modules packed into one file, smaller than a screenshot of many other apps
+- **Ultra lightweight**: the entire app is only ~**15 MB** — eight feature modules packed into one file, smaller than a screenshot of many other apps
 - **Native performance**: pure Rust with a native Windows GUI — instant startup, minimal memory footprint, silky-smooth UI. Zero Electron bloat (which typically weighs hundreds of MB)
-- **Your data stays yours**: TOTP secrets, SFTP passwords and other sensitive data are stored locally with encryption (DPAPI on Windows)
+- **Your data stays yours**: TOTP secrets, SFTP passwords and other sensitive data are stored locally with encryption (DPAPI on Windows, Keychain on macOS, secret service on Linux)
 - **Full workflow from password to production**: generate password → hash → SQL → SFTP deploy → remote check, all in one tool
 - **One-click security scan**: SSL certificate / security headers / sensitive paths / risky ports / legacy TLS, with a graded report
 - **Bilingual out of the box**: follows system language, one-click switch in-app
@@ -164,6 +173,14 @@ Lightweight one-stop server management toolbox — a native Windows / Linux desk
 - CSV export, full schema export as DDL (schema.sql), and row detail view
 - SQL read-only mode: one-click blocker for write statements, safer browsing
 - Query manager: save / reuse / delete frequently used SQL
+
+#### Redis Browser
+
+- Connect to Redis / Valkey servers (universal RESP protocol) with multi-connection management: save frequently used connections for quick switching
+- Browse databases (db0..dbN) with SCAN-paginated key listing (non-blocking, no full KEYS sweep)
+- Key details: type / TTL / value expanded by type (STRING direct read, LIST / SET / ZSET / HASH summary preview, values over 64 KB truncated)
+- Built-in command line: run any Redis command with tabular results (quoted arguments with spaces supported)
+- Connection passwords stored encrypted, hidden in display
 
 #### S3 Object Storage Browser
 
