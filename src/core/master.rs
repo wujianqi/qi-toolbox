@@ -239,8 +239,10 @@ pub fn try_silent_unlock() -> bool {
     else {
         return false;
     };
-    let Ok(key_b32) =
-        Base64::decode_vec(b64.trim()).and_then(|b| <[u8; 32]>::try_from(b.as_slice()))
+    // 密钥环内容损坏/长度不对：清除后走口令弹窗
+    let Some(key_b32) = Base64::decode_vec(b64.trim())
+        .ok()
+        .and_then(|b| <[u8; 32]>::try_from(b.as_slice()).ok())
     else {
         // 密钥环内容损坏：清除后走口令弹窗
         if let Ok(e) = keyring_entry() {
