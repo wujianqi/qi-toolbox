@@ -224,7 +224,9 @@ fn keyring_entry() -> Result<keyring::Entry, String> {
 fn store_unlock_bin(key: &[u8; 32]) -> Result<(), String> {
     // base64ct 编码为可打印串（密钥环要求 UTF-8），解码失败即弃用走口令弹窗
     let b64 = Base64::encode_string(key);
-    keyring_entry()?.set_password(&b64)
+    keyring_entry()?
+        .set_password(&b64)
+        .map_err(|e| e.to_string())
 }
 
 /// 尝试静默解锁：密钥环中存有派生密钥且校验值匹配 → 免输口令返回 true
@@ -233,11 +235,12 @@ pub fn try_silent_unlock() -> bool {
     if !is_set() || unlocked() {
         return unlocked();
     }
-    let Ok(b64) = keyring_entry().and_then(|e| e.get_password()) else {
+    let Ok(b64) = keyring_entry().and_then(|e| e.get_password().map_err(|er| er.to_string()))
+    else {
         return false;
     };
-    let Ok(key_b32) = Base64::decode_vec(b64.trim())
-        .and_then(|b| <[u8; 32]>::try_from(b.as_slice()).map_err(|_| ()))
+    let Ok(key_b32) =
+        Base64::decode_vec(b64.trim()).and_then(|b| <[u8; 32]>::try_from(b.as_slice()))
     else {
         // 密钥环内容损坏：清除后走口令弹窗
         if let Ok(e) = keyring_entry() {
